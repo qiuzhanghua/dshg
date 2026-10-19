@@ -244,6 +244,8 @@ Dock 面板可拖拽/缩放/折叠；布局持久化。默认一栏会话 + 一�
 
 ## 13. 依赖与开放问题
 
+实测计划见 [VALIDATION.md](VALIDATION.md)（V1–V11，含命令与判据）。
+
 - **token / URL 获取**（最大阻塞）：launch token 只在 dsh 进程内存与 stdout，无查询 API。
   M0 前必须定 UX：只支持"粘贴 URL"，还是同时提供"解析 dsh stdout / 启动器集成"。
 - **cookie 与 WS upgrade**：cookie 是否足以完成 WebSocket 升级，需实测（源码判据共用，

@@ -136,5 +136,6 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 2. `docs/design/PROTOCOL.md` —— v0.1 已完成（250 行，方法/事件/审批/插件，带源码依据），待实测验证。
 3. `docs/design/PARITY.md` —— v0.1 已完成，待按当前 dsh 版本复核。
 4. 评审 SPEC / PROTOCOL / PARITY → 排 M0 任务；M0 前先做协议实测
-   （token→cookie、WS upgrade、session/follow、审批往返、插件启停），仍不写产品代码。
+   （`docs/design/VALIDATION.md`：token→cookie、WS upgrade、session/follow、审批往返、插件启停），
+   仍不写产品代码。
 5. 评审通过并完成实测后，再开始编码。
