@@ -1,9 +1,9 @@
 # dshg 设计规格（SPEC）
 
-- 版本：v0.1 草案
+- 版本：v0.2 草案
 - 日期：2026-10-20
-- 上游需求：[需求纲要](../requirements/OUTLINE.md)（v0.3）
-- 状态：与需求纲要同步，待评审；协议细节见 `PROTOCOL.md`（调研中）
+- 上游需求：[需求纲要](../requirements/OUTLINE.md)（v0.4）
+- 状态：与需求纲要同步，待评审；协议细节见 [PROTOCOL.md](PROTOCOL.md)（v0.1）
 
 ## 1. 范围
 
@@ -61,31 +61,38 @@ Windows/Linux 首版支持；Web/TUI/移动端。
 
 ## 4. 协议接入
 
-方法级清单见 `PROTOCOL.md`；本节只定架构约束。已确认事实（源码：dsh 0.2.0-rc.2 依赖包）：
+方法级清单见 [PROTOCOL.md](PROTOCOL.md)（基于 dsh 0.2.0-rc.2 源码，未运行验证）。关键事实：
 
 - 启动：`dsh --profile web [--host] [--port] [--trusted-host] [--no-open]`。
-  `/api` 前缀下是客户端 RPC；有浏览器信任栅栏（Origin/Host 不匹配返回 401/403）；
-  默认禁止 `0.0.0.0`（需 `DSH_PKG_ALLOW_LAN=1`）。
-- **Unary RPC**：`POST /api/<method>`，`Content-Type: application/json`，请求体为
-  `{ rpcId, method, payload }` 信封，响应携带 `rpcId` + `result` 或 `error`。
-  （`dsh-client-connection/lib/index.js` 的 `rpcFetchHandler`；`API_PATH = "/api"`）
-- **流**：单条 WebSocket `/api/remote.mux`，复用承载多条逻辑流。
-  客户端消息 `open / item / end / cancel`，服务端消息 `item / error / end`，
-  均带 `streamId`；逻辑流用 endpoint 名区分（如 `$events`、`$events/result`）。
-  （`dsh-api-gateway/lib/types/stream-protocol.d.ts`）
-- **Host → Client 事件**：`$events` 流推送；部分事件是 **waterfall**（Host 请求 Client
-  执行监听器并回传结果），需要客户端通过 `$events/result` 回执——审批/问答很可能走这条路径，
-  是协议实现的重点。
-- `@deepseek-ai/dsh-sdk-protocol` 的 stdio JSON-RPC 只有 `initialize` / `session/prompt` /
-  `shutdown` 三个请求，不足以支撑 GUI，故不采用。
+- **认证**：进程级 launch token → 签名 cookie。
+  1. dsh 启动时打印 `dsh web: http://127.0.0.1:<port>/?token=<t>`，token 只在进程内存，**没有查询 API**；
+  2. `GET /?token=<t>` 换 `303 + Set-Cookie`（HttpOnly、SameSite=Strict、无 Secure、默认 30 天）；
+  3. 此后所有 `/api/*` 与 **WS upgrade** 只认 cookie；没有 loopback 免认证。
+  dshg 的 UX 因此是**粘贴 dsh 打印的 URL**（或 token），cookie 存 Keychain，过期/端口变化时重新粘贴。
+- **Unary RPC**：`POST /api/<ns>/<method>`，`Content-Type: application/json`，请求体
+  `{type:"client-request", rpcId, method, payload:{args:{<形参名>:值}}}`；响应
+  `{type:"server-response", rpcId, result:{ok:true,value}|{ok:false,error:{code,message,details}}}`。
+  业务失败仍是 HTTP 200；未认领端点回 404（两种失败语义要分开处理）。
+- **流**：单条 WebSocket `/api/remote.mux` 复用多条逻辑流，只收文本帧；C→H `open/item/end/cancel`，
+  H→C `item/error/end`，均带 `streamId`；逻辑流用 endpoint 区分。
+- **事件**：Web 侧没有 `session.event` / `session.status`（那是 stdio SDK 的命名）。实际是
+  27 项转发事件（`emit` + `approval/request`、`user-questions/request` 两个 **waterfall**）
+  + 各域流帧；会话内容走 `session/follow` 的 `snapshot/records/assistantStream` 帧。
+- **审批**：waterfall 帧到达，`POST /api/$events/result` 应答；可选结果只有
+  `allowed-once | rejected | cancelled | unavailable`，**没有 always-allow**；
+  持久策略属于 Host 侧 `permission-presets`。
+- **插件启停**：`pluginInventory/list` + `pluginManager/setPluginEnabled`（以及 bundle 级），
+  返回值 `ChangeResult.application ∈ {applied, restart-required, overridden, failed, cancelled}`，
+  **必须读返回值**，重启要求交给用户（attach 模式不代管进程）。
+- **版本**：没有版本协商；只能做端点存在性探测，把 `gateway/method-unavailable` 当能力缺失降级。
 
 dshg 的协议层职责：
 
-1. 连接探测：HTTP 就绪检查 → 建立 WS → 等 `ready` 帧（generation 就绪）。
-2. 请求：unary RPC（带超时、错误映射）；流式通道用于事件推送。
-3. 事件：`session.event`、`session.status`、子 agent 通知、连接重置；解码为领域类型。
-4. 重连：指数退避；generation 变化后丢弃旧缓存、按基线重新拉取，避免事件重复/丢失。
-5. 版本：握手/健康检查里记录引擎版本；与 dshg 支持的区间不符时提示升级，不静默降级。
+1. 连接引导：token URL → cookie（Keychain）→ 就绪探测。
+2. 请求：unary RPC（超时、错误映射、404 与 `ok:false` 区分）。
+3. 事件：waterfall 应答（审批/提问）、`session/follow` 帧解码、`connection/reset` 后重拉基线。
+4. 重连：指数退避（500ms→10s，抖动）；换代后各域按 baseline 恢复，单向 emit 不重放。
+5. 兼容：端点表按 dsh 包版本快照 + 严格白名单；未知错误码透传字符串，不猜语义。
 
 ## 5. 数据模型（Rust 侧核心类型）
 
@@ -146,11 +153,15 @@ Dock 面板可拖拽/缩放/折叠；布局持久化。默认一栏会话 + 一�
 
 ### 7.1 启动与连接
 
-1. 读本地配置（地址默认 `127.0.0.1:3080`）。
-2. 后台探测：HTTP 健康检查 → WS 连接 → 握手。
-3. 成功：拉会话列表 + 设置 + 插件清单；恢复上次选中的会话与窗口布局。
-4. 失败：首屏显示引导——检测常见原因（未启动/端口占用/版本不符），提供
-   "复制启动命令"和"重试"。
+1. 读本地配置：地址、Keychain 里的会话 cookie、上次的 workspace 与会话。
+2. 若 cookie 有效：直接就绪探测（`settings/describe` 之类的轻请求）→ 建 WS → 等 `$events` 的
+   `ready` 帧。
+3. 若没有 cookie 或已过期：首屏要求**粘贴 `dsh web` 打印的 URL**（含 `?token=`）；
+   `GET /?token=…` 拿 `Set-Cookie` → 存 Keychain → 继续第 2 步。
+4. 成功：拉 `session/list` + `settings/describe` + `pluginInventory/list`；恢复上次会话与布局。
+5. 失败：按状态码给引导——401（cookie 失效/需重贴 URL）、403（Host/Origin 栅栏）、
+   连接拒绝（引擎未启动）、404（端点不存在，可能 dsh 版本不匹配）。
+   同时提供"复制启动命令"和"重试"。
 
 ### 7.2 发送一轮消息
 
@@ -161,16 +172,20 @@ Dock 面板可拖拽/缩放/折叠；布局持久化。默认一栏会话 + 一�
 
 ### 7.3 断线与恢复
 
-- WS 断开：状态栏显示"重连中（第 N 次）"，指数退避（0.5s → 30s 封顶）。
-- 重连成功：比较 generation；变化则重新拉会话列表与当前会话基线事件，
-  丢弃旧缓存里未确认的增量（避免重复）。
+- WS 断开：状态栏显示"重连中（第 N 次）"，退避 500ms → 1s → 2s → … → 10s 封顶，带抖动。
+- 重连成功：`$events` 新代 `ready` 帧 → 本地广播 `connection/reset`：
+  全量缓存重拉；当前会话用 `session/follow` 的新 `snapshot` 重建，必要时用 `session/page`
+  按 `throughSeq/beforeSeq` 修 gap。**单向 `emit` 事件不重放**。
 - 期间用户操作：只允许编辑草稿；发送按钮禁用并提示。
 
 ### 7.4 插件启停
 
-1. 设置 → 插件：列出 inventory（名称/版本/状态）。
-2. 切换启用/禁用 → 调对应 RPC → 等待引擎确认 → 刷新状态；失败回滚开关并提示。
-3. 若引擎要求重启才生效：明确标注，并提供"重启引擎"指引（不代管进程）。
+1. 设置 → 插件：`pluginInventory/list` 列出清单（名称/版本/状态/`fiberPhase`）。
+2. 切换启用/禁用 → `pluginManager/setPluginEnabled`（或 bundle 级）→ 读返回的
+   `ChangeResult.application`：
+   `applied` 直接刷新；`restart-required` 明确标注并给"重启 dsh"指引（不代管进程）；
+   `overridden` 说明被更高优先级配置覆盖；`failed` / `cancelled` 回滚开关并提示。
+3. 插件**配置**走 `settings/*`，与启停分开。
 
 ## 8. 设置与本地持久化
 
@@ -179,14 +194,16 @@ Dock 面板可拖拽/缩放/折叠；布局持久化。默认一栏会话 + 一�
 | 连接地址、最近 workspace | `config.json` | 明文，可手工编辑 |
 | 窗口布局、主题、语言、快捷键 | `config.json` | 版本化字段，向后兼容 |
 | 草稿 | 按会话存 `config.json` 或独立文件 | 崩溃恢复用 |
+| **会话 cookie** | **Keychain** | 签名 cookie，绑定 `host:port`；30 天有效；过期/端口变化需重贴 URL |
 | 日志 | `~/Library/Logs/dshg/` | 滚动、脱敏 |
 | 模型/密钥/沙箱 | 引擎侧 | GUI 经 API 读写，不重复存 |
 
 ## 9. 错误处理与诊断
 
-- 统一错误分类：`EngineNotRunning` / `EngineVersionMismatch` / `Transport` / `Rpc` /
-  `Decode` / `LocalIo`；UI 文案与"下一步动作"一一对应。
-- 诊断页（设置 → 关于/诊断）：引擎地址、版本、连接代数、最近错误、导出日志（脱敏）。
+- 统一错误分类：`EngineNotRunning` / `Unauthorized` / `TrustFence` / `Transport` / `Rpc` /
+  `EndpointMissing` / `Decode` / `LocalIo`；UI 文案与"下一步动作"一一对应。
+- 诊断页（设置 → 关于/诊断）：引擎地址、dsh 包版本、连接代数、最近错误、导出日志（脱敏）。
+  注意：协议本身没有版本协商，版本只能从包/启动信息里读，不能依赖握手。
 - 不做自动上报；崩溃采集默认关闭。
 
 ## 10. 性能预算
@@ -216,21 +233,27 @@ Dock 面板可拖拽/缩放/折叠；布局持久化。默认一栏会话 + 一�
 
 演示脚本（真机、真实 dsh）：
 
-1. 引擎未启动 → 首屏引导；启动引擎 → 点击重试 → 列出会话。
+1. 引擎未启动 → 首屏引导；启动引擎 → 粘贴 `dsh web` 打印的 URL → 列出会话。
 2. 选择一个 1 万+ 事件的会话 → 滚动流畅、工具卡片与代码块正确。
-3. 发一条会触发工具调用的消息 → 流式输出 → 出现审批 → 批准 → 工具结果 → 完成。
+3. 发一条会触发工具调用的消息 → 流式输出 → 出现审批 → 允许一次 → 工具结果 → 完成。
 4. 拒绝一次审批 → 会话给出拒绝结果，不卡死。
-5. 断开引擎再恢复 → 客户端自动重连、会话状态一致、无重复消息。
+5. 断开引擎再恢复 → 客户端自动重连（或重新粘贴 URL）、会话状态一致、无重复消息。
 6. 设置里切换主题/语言/模型 → 立即生效（模型以引擎确认状态为准）。
-7. 禁用某插件 → 插件清单状态变化；重启引擎后仍保持。
+7. 禁用某插件 → 按 `ChangeResult.application` 呈现；需要重启时给出指引，重启后状态保持。
 8. 性能指标达到第 10 节阈值（记录测量数据）。
 
 ## 13. 依赖与开放问题
 
-- **协议方法名与事件字段**：以 `PROTOCOL.md` 为准，M0 前必须完成并实测。
-- **审批超时与默认动作**：引擎侧是否存在默认超时/拒绝？GUI 超时后如何呈现（待确认）。
-- **插件热启停语义**：启停是否需要引擎重启；对运行中会话的影响（待确认）。
-- **事件分页/回放**：拉取历史事件是否有分页上限；超长会话的基线策略（待确认）。
-- **文件预览能力边界**：只读预览走哪个 API、是否支持二进制/大文件（待确认）。
-- **dsh RC 稳定性**：0.2.0-rc.2 起至少跟一个 minor 的兼容窗口。
+- **token / URL 获取**（最大阻塞）：launch token 只在 dsh 进程内存与 stdout，无查询 API。
+  M0 前必须定 UX：只支持"粘贴 URL"，还是同时提供"解析 dsh stdout / 启动器集成"。
+- **cookie 与 WS upgrade**：cookie 是否足以完成 WebSocket 升级，需实测（源码判据共用，
+  但未运行验证）；过期/端口变化后的重连体验也要实测。
+- **`session/follow` 帧序列**：`snapshot + surfaceOp + assistantStream` 的真实边界、
+  重连 gap 修复，决定会话渲染正确性（PROTOCOL 已列必测点）。
+- **审批 waterfall 往返**：`displayReason` 是否上线、`outcome` 实际取值、超时/取消后的
+  session 行为（PROTOCOL §6、§9）。
+- **插件启停生效方式**：`setPluginEnabled` 在真实 profile 上是 `applied` 还是
+  `restart-required`；对运行中会话的影响。
+- **文件预览能力边界**：`workspaceFiles/read`/`readBytes` 的大文件与二进制策略。
+- **dsh RC 稳定性**：0.2.0-rc.2 起至少跟一个 minor；端点表按版本快照。
 - **macOS 最低版本**：GPUI/GPUI Kit 实测后确定（暂定 macOS 13+）。

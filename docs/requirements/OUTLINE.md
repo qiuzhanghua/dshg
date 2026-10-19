@@ -1,6 +1,6 @@
 # dshg 需求纲要（一页纸）
 
-- 版本：v0.3 草案
+- 版本：v0.4 草案
 - 日期：2026-10-20
 - 状态：方向已确认（首版仅 macOS、attach 外部 dsh 引擎、与官方 Web UI 长期并存、
   GUI 内可启停插件、不做远程连接、MVP 不含终端与文件编辑）；
@@ -38,8 +38,8 @@
 
 关键场景：
 
-- **S1 首次连接即聊**：打开 app → 探测/填写已运行的 dsh 地址 → 选 workspace → 发第一条消息
-  ≤ 3 次点击（引擎由用户启动）。
+- **S1 首次连接即聊**：打开 app → 粘贴 `dsh web` 打印的 URL（之后复用已存 cookie）→ 选 workspace →
+  发第一条消息（引擎由用户启动）。
 - **S2 长会话流畅**：1 万+ 事件的历史会话滚动、折叠、搜索不卡顿。
 - **S3 审批可控**：工具调用需审批时，通知 + 一键批准/拒绝，且能追溯"谁批了什么"。
 - **S4 工具结果可读**：bash 输出、diff、文件读写、子 agent、workflow 以结构化卡片呈现。
@@ -56,10 +56,13 @@
 
 **GUI = dsh 的前端客户端；引擎 = 用户自行运行的 dsh 进程（首版只 attach，不内嵌）。**
 
-- 引擎连接：用户自行运行 `dsh --profile web`（默认 `127.0.0.1:3080`），dshg 通过 dsh
-  **Client API（HTTP + WebSocket，Typert Remote gateway）** 连接，协议与官方 Web 前端一致。
-  - 连接管理：设置里可改地址；启动时探测，未连接时给引导（复制启动命令、重试）；
-    断线自动重连；引擎版本不匹配时明确提示。
+- 引擎连接：用户自行运行 `dsh --profile web`，dshg 通过 dsh **Client API（HTTP + WebSocket，
+  Typert Remote gateway）** 连接，协议与官方 Web 前端一致。
+  - **认证**：dsh 启动时打印带一次性 `?token=` 的 URL，用 `GET /?token=…` 换签名 cookie，
+    之后 `/api/*` 与 WS 升级都只认 cookie；**没有查询 token 的 API**。
+    因此首连 UX 是"粘贴 `dsh web` 打印的 URL"，cookie 存 Keychain（30 天）。
+  - 连接管理：设置里可改地址；启动时探测，未连接时给引导（复制启动命令、重新粘贴 URL、重试）；
+    断线自动重连；协议无版本协商，端点缺失时按"能力缺失"降级并提示。
   - 安全边界：只连本机 loopback（dsh 默认禁止 `0.0.0.0`）；不做远程 attach。
 - 为什么不走另外两条路：
   - `dsh-sdk-protocol`（stdio JSON-RPC）只有 `initialize` / `session/prompt` / `shutdown`
@@ -91,7 +94,7 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
   会话切换 < 200ms；10k 事件滚动 ≥ 60fps；常驻内存 < 300MB。
 - 可访问性：AccessKit 角色/名称/状态完整；全键盘可达。
 - 国际化：zh-CN / en，跟随系统，可覆盖。
-- 安全：只连本机 loopback；密钥存系统钥匙串（Keychain）；日志脱敏。
+- 安全：只连本机 loopback；会话 cookie 存 Keychain；启动 token 不落盘；日志脱敏。
 - 打包：macOS 签名+公证、Windows 签名、自动更新；崩溃上报默认关闭/可退出。
 - 质量：gpui_kit::test 无头 UI 测试 + 协议 mock server 契约测试 + 真机冒烟。
 
@@ -106,6 +109,7 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 | 风险 | 影响 | 应对 |
 | --- | --- | --- |
 | dsh 客户端协议未公开、RC 期频繁变更 | 高 | 协议适配层 + pin 版本 + 契约测试 |
+| **启动 token 无查询 API**，只能从 dsh stdout 拿 | 高 | 首连 UX 定为"粘贴 URL"；cookie 缓存降低重复成本 |
 | Rust 侧需自维护 HTTP+WS RPC 客户端 | 中 | 先做协议文档与最小连通性验证（暂不写产品代码） |
 | 后续若内嵌引擎：Node 运行时体积/安全更新 | 中 | 首版不内嵌；需要时再评估双模式 |
 | GPUI/GPUI Kit 在 Linux/Wayland、Windows IME 的成熟度 | 中 | 首版收敛到 macOS，后续里程碑实测 |
@@ -128,8 +132,9 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 
 ## 11. 下一步（只出文档，不写代码）
 
-1. `docs/design/SPEC.md` —— 初稿已完成（v0.1），待评审。
-2. `docs/design/PROTOCOL.md` —— 协议梳理进行中（不写产品代码）：REST/WS 方法、事件模型、
-   审批流、插件启停接口。
-3. `docs/design/PARITY.md` —— 与官方 Web UI 的功能对照与差异清单（待启动）。
-4. SPEC / PROTOCOL 评审通过后，再排 M0 任务并开始编码。
+1. `docs/design/SPEC.md` —— v0.2 已完成，待评审。
+2. `docs/design/PROTOCOL.md` —— v0.1 已完成（250 行，方法/事件/审批/插件，带源码依据），待实测验证。
+3. `docs/design/PARITY.md` —— v0.1 已完成，待按当前 dsh 版本复核。
+4. 评审 SPEC / PROTOCOL / PARITY → 排 M0 任务；M0 前先做协议实测
+   （token→cookie、WS upgrade、session/follow、审批往返、插件启停），仍不写产品代码。
+5. 评审通过并完成实测后，再开始编码。
