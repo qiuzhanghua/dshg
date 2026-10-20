@@ -1,6 +1,6 @@
 # dshg 需求纲要（一页纸）
 
-- 版本：v0.6 草案
+- 版本：v0.7 草案
 - 日期：2026-10-20
 - 状态：**范围升级**——总体需求改为"完全复刻 dsh-tauri 桌面端的功能"（见
   [design/PARITY-TARGET.md](../design/PARITY-TARGET.md)），此前"MVP 子集"的范围与相关决策作废，
@@ -34,7 +34,7 @@
 | 个人开发者（主力） | 本地仓库里开长会话写代码；并行多个会话；在本地即时处理审批 |
 | 同一台机器的多项目使用者 | 多仓库切换，会话与 workspace 绑定清晰 |
 
-不做远程/局域网连接（已确认）：用户在本机运行 dsh，dshg 只连本机 loopback。
+远程/局域网：纳入 P3（LAN + QR + Cloudflare 隧道）；移动端 App 不在当前范围。
 
 关键场景：
 
@@ -48,15 +48,15 @@
 ## 4. 形态与平台
 
 - 形态：原生桌面应用（单窗口 + Dock 面板布局），无浏览器依赖。
-- 平台：**macOS 先行，Windows / Linux 作为 P4 目标**（待确认，见 PARITY-TARGET §6）。
+- 平台：**macOS 先行，Windows / Linux 作为 P4 目标**（已确认）。
 - 不做：Web 版、TUI；移动端 App 是否复刻待定；不再排除远程/局域网（旧决策作废）。
 
 ## 5. 架构主张
 
-**GUI = dsh 的前端客户端；引擎 = 管理式运行时（默认）或用户已有的 dsh（可选 attach）。**
+**GUI = dsh 的前端客户端；引擎 = 管理式运行时（默认），可切换为 attach 用户已有的 dsh。**
 
 > 旧决策"只 attach、不内嵌"已被"完全复刻"覆盖：dsh-tauri 会下载并管理 Node/dsh、切换核心。
-> 建议改为"默认管理式 + 可选 attach"（待确认），M0 的 attach 作为过渡与调试入口保留。
+> 已确认改为"**默认管理式 + 可选 attach**"；M0 的 attach 作为过渡与调试入口保留。
 
 - 引擎连接：用户自行运行 `dsh --profile web`，dshg 通过 dsh **Client API（HTTP + WebSocket，
   Typert Remote gateway）** 连接，协议与官方 Web 前端一致。
@@ -65,7 +65,7 @@
     因此首连 UX 是"粘贴 `dsh web` 打印的 URL"，cookie 存 Keychain（30 天）。
   - 连接管理：设置里可改地址；启动时探测，未连接时给引导（复制启动命令、重新粘贴 URL、重试）；
     断线自动重连；协议无版本协商，端点缺失时按"能力缺失"降级并提示。
-  - 安全边界：只连本机 loopback（dsh 默认禁止 `0.0.0.0`）；不做远程 attach。
+  - 安全边界：默认只连本机 loopback；远程（LAN/隧道）在 P3 单独设计配对与访问码。
 - 为什么不走另外几条路（详见 `docs/design/INTEGRATION-MODES.md`）：
   - `headless`：一次性任务，无追问/审批/会话列表；
   - `dsh-sdk-protocol`（stdio JSON-RPC）：只有 `initialize` / `session/prompt` / `shutdown`
@@ -75,8 +75,8 @@
   - 三者都是 stdio，必须由 dshg spawn 引擎，与"attach 已运行实例"冲突。
 - 协议类型：从 dsh 的 TS 类型/协议定义生成 Rust 类型（或手写 + 契约测试），
   以官方 Web 前端的 `dsh-client-ui-*` 包行为作为参考实现。
-- 引擎分发：**首版不内嵌**（已确认 attach 模式）。若后续做内嵌，再评估自带 Node 运行时
-  （当前 node_modules 441MB、Node 运行时 191MB）与依赖用户 Node 的取舍。
+- 引擎分发：**默认管理式**（下载/管理 Node 与 dsh、可切核心），同时保留 attach 已有 dsh；
+  具体见 [PARITY-TARGET](PARITY-TARGET.md) 的 C 区。
 
 ## 6. 功能范围
 
@@ -118,31 +118,27 @@
 | dsh 客户端协议未公开、RC 期频繁变更 | 高 | 协议适配层 + pin 版本 + 契约测试 |
 | **启动 token 无查询 API**，只能从 dsh stdout 拿 | 高 | 首连 UX 定为"粘贴 URL"；cookie 缓存降低重复成本 |
 | Rust 侧需自维护 HTTP+WS RPC 客户端 | 中 | 先做协议文档与最小连通性验证（暂不写产品代码） |
-| 后续若内嵌引擎：Node 运行时体积/安全更新 | 中 | 首版不内嵌；需要时再评估双模式 |
+| 管理式运行时：下载/校验/多版本/回滚 | 中 | P2 落地；M0 先用 attach 过渡 |
 | GPUI/GPUI Kit 在 Linux/Wayland、Windows IME 的成熟度 | 中 | 首版收敛到 macOS，后续里程碑实测 |
 | 审批/权限 UI 与官方不一致导致误操作 | 中 | 以官方前端为参考，差异评审 |
 | 官方 Web UI 迭代快，功能追赶 | 中 | MVP 边界 + 路线图对齐 |
 
 ## 10. 决策与待确认问题
 
-**已被"完全复刻"覆盖、需重新确认**（2026-10-20 旧结论）：
+**已确认（2026-10-20，覆盖旧 MVP 决策）**：
 
-| 旧结论 | 现状 | 建议 |
-| --- | --- | --- |
-| 只 attach、不内嵌 | 与 dsh-tauri 的管理式运行时冲突 | 默认管理式 + 可选 attach |
-| 不做远程/局域网 | dsh-tauri 有 LAN/QR/隧道 | 桌面端远程纳入 P3，移动 App 待定 |
-| 不做终端、不做文件编辑 | 终端在 dsh-tauri 中存在 | 终端 P2；文件保持只读 |
-| 插件仅启停 | dsh-tauri 有完整插件管理 | P2 完整管理 |
-| 首版仅 macOS | dsh-tauri 三平台 | macOS 先行，P4 三平台 |
-| MVP 不做宠物/个性化 | dsh-tauri 有宠物与 8 调色板 | P3，可后置 |
+| 维度 | 结论 |
+| --- | --- |
+| 引擎 | **默认管理式运行时**（下载 Node/dsh、切核心），**可选 attach** 已有 dsh |
+| 平台 | macOS 先行，**P4 补 Windows/Linux** |
+| 远程 | 做 **LAN + QR + Cloudflare 隧道**（桌面端）；移动 App 后续再评估 |
+| 终端/文件 | 终端 P2 纳入；文件保持只读（dsh 无写 API） |
+| 插件 | P2 完整管理（内置/preset/安装/禁用/依赖） |
+| 宠物 | **后置**；个性化（调色板/模糊/缩放）先做 |
+| 验收 | **功能与流程对齐** dsh-tauri，不要求视觉像素级一致 |
+| 不变 | 不改 dsh 源码、不 fork、不重写 agent 内核；与官方 Web UI 并存 |
 
-仍然有效：
-
-- 不改 dsh 源码、不 fork；不重写 agent 内核；
-- 与官方 Web UI 长期并存、不替代（复刻对象是 dsh-tauri，不是 Web UI）；
-- 不做像素级 UI 复刻（功能与流程对齐即可，待确认）。
-
-待拍板问题见 PARITY-TARGET §6（引擎模型、平台、移动端、远程、宠物、验收口径）。
+移动端 App 不在当前范围，作为后续独立评估项。
 
 ## 11. 下一步（只出文档，不写代码）
 
