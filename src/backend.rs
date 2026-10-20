@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::connection::auth::{self, AuthTarget};
-use crate::error::AppError;
-use crate::secrets::SessionCookie;
+use dshg::connection::auth::{self, AuthTarget};
+use dshg::error::AppError;
+use dshg::secrets::SessionCookie;
 
 /// Shared tokio runtime for all network work; the GPUI thread never blocks on it.
 pub fn runtime() -> &'static tokio::runtime::Runtime {

@@ -38,6 +38,25 @@ pub async fn session_list(client: &UnaryClient) -> Result<Vec<SessionSummary>, A
     Ok(page.items)
 }
 
+/// Queue one text prompt on a session (M2).
+pub async fn send_prompt(
+    client: &UnaryClient,
+    session_id: &str,
+    request_id: &str,
+    text: &str,
+) -> Result<(), AppError> {
+    let args = serde_json::json!({
+        "request": {
+            "requestId": request_id,
+            "sessionId": session_id,
+            "mode": "queue",
+            "content": [{ "type": "text", "text": text }],
+        }
+    });
+    client.call("session/prompt", args).await?;
+    Ok(())
+}
+
 /// Create a session, optionally rooted at `cwd`, and return its id.
 pub async fn create_session(
     client: &UnaryClient,

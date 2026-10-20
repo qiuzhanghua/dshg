@@ -1,10 +1,5 @@
 mod app;
 mod backend;
-mod config;
-mod connection;
-mod error;
-mod protocol;
-mod secrets;
 
 use std::time::Duration;
 
@@ -12,9 +7,10 @@ use gpui_kit::*;
 
 use crate::app::AppState;
 use crate::backend::authenticate;
-use crate::connection::http::UnaryClient;
-use crate::connection::ws;
-use crate::error::AppError;
+use dshg::protocol::methods;
+use dshg::connection::http::UnaryClient;
+use dshg::connection::ws;
+use dshg::error::AppError;
 
 fn run_probe(input: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -28,7 +24,7 @@ fn run_probe(input: &str) -> Result<(), AppError> {
             "authenticated with dsh"
         );
         let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
-        let sessions = protocol::methods::session_list(&unary).await?;
+        let sessions = methods::session_list(&unary).await?;
         println!("{}", serde_json::to_string_pretty(&sessions)?);
         Ok(())
     })
@@ -64,8 +60,22 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     runtime.block_on(async {
         let (target, cookie) = authenticate(input).await?;
         let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
-        let session_id = protocol::methods::create_session(&unary, cwd).await?;
+        let session_id = methods::create_session(&unary, cwd).await?;
         println!("{session_id}");
+        Ok(())
+    })
+}
+
+fn run_prompt(input: &str, session_id: &str, text: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        methods::send_prompt(&unary, session_id, &request_id, text).await?;
+        println!("accepted");
         Ok(())
     })
 }
@@ -79,11 +89,19 @@ fn run_follow(input: &str, session_id: &str) -> Result<(), AppError> {
         let (tx, rx) = async_channel::unbounded();
         let session_id = session_id.to_string();
         let follow = tokio::spawn(async move {
-            let _ = crate::connection::follow::follow_session(&target.base, &cookie, &session_id, tx).await;
+            let _ = dshg::connection::follow::follow_session(&target.base, &cookie, &session_id, tx).await;
         });
-        for _ in 0..2 {
-            match tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await {
-                Ok(Ok(value)) => println!("{}", serde_json::to_string_pretty(&value)?),
+        for _ in 0..30 {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                Ok(Ok(value)) => {
+                    let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                    let detail = value
+                        .get("event")
+                        .and_then(|e| e.get("type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    println!("{kind} {detail}");
+                }
                 _ => break,
             }
         }
@@ -120,6 +138,17 @@ fn main() {
             };
             let cwd = args.get(3).map(String::as_str);
             if let Err(error) = run_create(url, cwd) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--prompt") => {
+            let (Some(url), Some(session_id), Some(text)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: dshg --prompt <dsh-web-url> <sessionId> <text>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_prompt(url, session_id, text) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

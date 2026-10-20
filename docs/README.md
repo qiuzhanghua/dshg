@@ -36,8 +36,14 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 | T4 WS `/api/remote.mux` + `$events` ready | 完成（`dshg --events` 对真实 dsh 验证） |
 | T5 会话列表 + 引导 UI | 完成（已手工验收） |
 
-M1（只读回放）进行中：`session/follow` 快照 + Markdown/工具卡片渲染已完成；
-assistant 流式帧、gap 修复、虚拟化列表待做。
+M1（只读回放）：`session/follow` 快照、Markdown/工具卡片、assistant `text-delta` 流式、
+follow 断线自动重连已完成；gap 修复（`session/page`）与虚拟化列表待做。
+
+M2（对话）：Composer + `session/prompt` 已接（`--prompt` 验证 accepted）；
+审批 UI（M3）未开始。
+
+工程：core 拆成 `src/lib.rs`（config/connection/protocol/secrets/transcript），
+`cargo test --lib` 23 个测试全绿，解析层不再依赖 GPUI。
 
 ## 运行
 

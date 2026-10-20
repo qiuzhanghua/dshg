@@ -13,11 +13,12 @@ use serde_json::Value;
 use url::Url;
 
 use crate::backend;
-use crate::config::Config;
-use crate::connection::follow;
-use crate::connection::http::UnaryClient;
-use crate::protocol::methods::{self, SessionSummary};
-use crate::secrets::SessionCookie;
+use dshg::config::Config;
+use dshg::connection::follow;
+use dshg::connection::http::UnaryClient;
+use dshg::protocol::methods::{self, SessionSummary};
+use dshg::secrets::SessionCookie;
+use dshg::transcript::{parse_frame, TranscriptItem};
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -28,6 +29,10 @@ pub enum AppEvent {
         cookie: SessionCookie,
     },
     Frame(Value),
+    PromptDone {
+        ok: bool,
+        message: Option<String>,
+    },
     Failed {
         code: String,
         message: String,
@@ -39,14 +44,6 @@ enum Phase {
     NeedsAuth,
     Connecting,
     Ready,
-}
-
-#[derive(Clone, Debug)]
-enum TranscriptItem {
-    User(String),
-    Assistant(String),
-    ToolCall { name: String, arguments: String },
-    ToolResult { text: String, error: bool },
 }
 
 struct ErrorView {
@@ -61,6 +58,10 @@ pub struct AppState {
     url_input: Entity<InputState>,
     sessions: Vec<SessionSummary>,
     transcript: Vec<TranscriptItem>,
+    live_assistant: String,
+    prompt_input: Entity<InputState>,
+    sending: bool,
+    notice: Option<String>,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -75,6 +76,9 @@ impl AppState {
         let config = Config::load_or_default(&Config::path());
         let url_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("粘贴 dsh web 打印的 URL（含 token）")
+        });
+        let prompt_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("输入消息，Enter 发送（M2）")
         });
         let (events_tx, events_rx): (Sender<AppEvent>, Receiver<AppEvent>) =
             async_channel::unbounded();
@@ -95,6 +99,10 @@ impl AppState {
             url_input,
             sessions: Vec::new(),
             transcript: Vec::new(),
+            live_assistant: String::new(),
+            prompt_input,
+            sending: false,
+            notice: None,
             following: None,
             base: None,
             cookie: None,
@@ -128,6 +136,12 @@ impl AppState {
             AppEvent::Frame(value) => {
                 self.push_frame(value);
             }
+            AppEvent::PromptDone { ok, message } => {
+                self.sending = false;
+                if !ok {
+                    self.notice = message;
+                }
+            }
             AppEvent::Failed { code, message } => {
                 self.phase = Phase::NeedsAuth;
                 self.error = Some(ErrorView { code, message });
@@ -136,11 +150,47 @@ impl AppState {
     }
 
     fn push_frame(&mut self, value: Value) {
+        if value.get("type").and_then(Value::as_str) == Some("assistant-stream") {
+            self.apply_assistant_stream(&value);
+            return;
+        }
         let (is_snapshot, items) = parse_frame(&value);
         if is_snapshot {
             self.transcript.clear();
+            self.live_assistant.clear();
+        }
+        if items
+            .iter()
+            .any(|item| matches!(item, TranscriptItem::Assistant(_)))
+        {
+            self.live_assistant.clear();
         }
         self.transcript.extend(items);
+    }
+
+    fn apply_assistant_stream(&mut self, value: &Value) {
+        let Some(frame) = value.get("frame") else {
+            return;
+        };
+        match frame.get("type").and_then(Value::as_str) {
+            Some("start") => self.live_assistant.clear(),
+            Some("chunk") => {
+                if let Some(chunk) = frame.get("chunk")
+                    && chunk.get("type").and_then(Value::as_str) == Some("text-delta")
+                    && let Some(text) = chunk.get("text").and_then(Value::as_str)
+                {
+                    self.live_assistant.push_str(text);
+                }
+            }
+            Some("end") => {
+                if let Some(outcome) = frame.get("outcome")
+                    && outcome.get("kind").and_then(Value::as_str) == Some("abandoned")
+                {
+                    self.live_assistant.clear();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn connect(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -180,6 +230,48 @@ impl AppState {
                 Err(error) => AppEvent::Failed {
                     code: error.code().to_string(),
                     message: error.to_string(),
+                },
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn send(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        let Some(session_id) = self.following.clone() else {
+            return;
+        };
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        let text = self.prompt_input.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.sending = true;
+        self.notice = None;
+        cx.notify();
+        self.prompt_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result: Result<(), dshg::error::AppError> = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                let request_id = uuid::Uuid::new_v4().to_string();
+                methods::send_prompt(&client, &session_id, &request_id, &text).await
+            }
+            .await;
+            let event = match result {
+                Ok(()) => AppEvent::PromptDone {
+                    ok: true,
+                    message: None,
+                },
+                Err(error) => AppEvent::PromptDone {
+                    ok: false,
+                    message: Some(error.to_string()),
                 },
             };
             tx.send(event).await.ok();
@@ -275,6 +367,7 @@ impl AppState {
         muted: Hsla,
         border: Hsla,
         accent: Hsla,
+        danger: Hsla,
     ) -> AnyElement {
         let authority = self.authority.clone().unwrap_or_default();
 
@@ -361,7 +454,8 @@ impl AppState {
                             .flex()
                             .flex_col()
                             .min_h(px(0.))
-                            .child(self.render_transcript(cx, muted, accent)),
+                            .child(self.render_transcript(cx, muted, accent))
+                        .child(self.render_composer(cx, muted, border, danger)),
                     ),
             )
             .into_any_element()
@@ -432,7 +526,58 @@ impl AppState {
         row.into_any_element()
     }
 
-    fn render_transcript(&self, cx: &mut Context<Self>, muted: Hsla, accent: Hsla) -> AnyElement {
+    fn render_composer(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        border: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        if self.following.is_none() {
+            return div().into_any_element();
+        }
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .px(px(16.))
+            .py(px(10.))
+            .border_t(px(1.))
+            .border_color(border);
+        if let Some(notice) = &self.notice {
+            column = column.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(danger)
+                    .child(notice.clone()),
+            );
+        }
+        column
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().child(Input::new(&self.prompt_input).w_full()))
+                    .child(
+                        Button::new("send")
+                            .primary()
+                            .label(if self.sending { "发送中…" } else { "发送" })
+                            .disabled(self.sending)
+                            .on_click(cx.listener(Self::send)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child("Enter 发送暂未绑定（M2 待补）"),
+            )
+            .into_any_element()
+    }
+
+    fn render_transcript(&self, _cx: &mut Context<Self>, muted: Hsla, accent: Hsla) -> AnyElement {
         if self.following.is_none() {
             return div()
                 .flex_1()
@@ -459,6 +604,10 @@ impl AppState {
         }
         for (index, item) in self.transcript.iter().enumerate() {
             column = column.child(render_item(index, item, muted, accent));
+        }
+        if !self.live_assistant.is_empty() {
+            let live = TranscriptItem::Assistant(self.live_assistant.clone());
+            column = column.child(render_item(self.transcript.len(), &live, muted, accent));
         }
 
         div()
@@ -544,85 +693,9 @@ fn truncate(text: &str, limit: usize) -> String {
     }
 }
 
-fn message_text(message: &Value) -> String {
-    message
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
-}
-
-fn parse_event(event: &Value) -> Option<TranscriptItem> {
-    let kind = event.get("type")?.as_str()?;
-    let data = event.get("data")?;
-    match kind {
-        "user/message" => {
-            let text = message_text(data.get("message")?);
-            (!text.is_empty()).then_some(TranscriptItem::User(text))
-        }
-        "assistant/message" => {
-            let text = message_text(data.get("message")?);
-            (!text.is_empty()).then_some(TranscriptItem::Assistant(text))
-        }
-        "tool/call" => Some(TranscriptItem::ToolCall {
-            name: data.get("name")?.as_str()?.to_string(),
-            arguments: data
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        }),
-        "tool/result" => {
-            let message = data.get("message")?;
-            Some(TranscriptItem::ToolResult {
-                text: message_text(message),
-                error: message
-                    .get("isError")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Returns `(is_snapshot, items)`.
-fn parse_frame(value: &Value) -> (bool, Vec<TranscriptItem>) {
-    match value.get("type").and_then(Value::as_str) {
-        Some("snapshot") => {
-            let mut items = Vec::new();
-            if let Some(records) = value.get("records").and_then(Value::as_array) {
-                for record in records {
-                    if let Some(event) = record.get("event")
-                        && let Some(item) = parse_event(event)
-                    {
-                        items.push(item);
-                    }
-                }
-            }
-            (true, items)
-        }
-        Some("event") => {
-            let items = value
-                .get("event")
-                .and_then(parse_event)
-                .into_iter()
-                .collect();
-            (false, items)
-        }
-        _ => (false, Vec::new()),
-    }
-}
-
 async fn connect_flow(
     input: &str,
-) -> Result<(String, Vec<SessionSummary>, Url, SessionCookie), crate::error::AppError> {
+) -> Result<(String, Vec<SessionSummary>, Url, SessionCookie), dshg::error::AppError> {
     let (target, cookie) = backend::authenticate(input).await?;
     let unary = UnaryClient::new(target.base.clone(), Some(cookie.clone()))?;
     let sessions = methods::session_list(&unary).await?;
@@ -640,7 +713,7 @@ impl Render for AppState {
         let danger = colors.danger;
 
         let body = if self.phase == Phase::Ready {
-            self.render_shell(cx, muted, border, accent)
+            self.render_shell(cx, muted, border, accent, danger)
         } else {
             self.render_onboarding(cx, muted, danger)
         };

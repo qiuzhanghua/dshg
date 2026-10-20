@@ -19,6 +19,28 @@ pub async fn follow_session(
     session_id: &str,
     frames: Sender<Value>,
 ) -> Result<(), AppError> {
+    loop {
+        match follow_once(base, cookie, session_id, &frames).await {
+            Ok(()) => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(AppError::Unauthorized) | Err(AppError::TrustFence(_)) => {
+                return Err(AppError::Unauthorized);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "session follow dropped; reconnecting");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn follow_once(
+    base: &Url,
+    cookie: &SessionCookie,
+    session_id: &str,
+    frames: &Sender<Value>,
+) -> Result<(), AppError> {
     let ws_url = mux_url(base)?;
     let mut request = ws_url
         .as_str()
