@@ -25,6 +25,17 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 - **不做**远程/局域网连接
 - MVP **不含**内置终端与文件编辑（文件只读预览 + diff）
 
+## 实现进度（M0）
+
+| 任务 | 状态 |
+| --- | --- |
+| T0 脚手架（gpui-kit 窗口） | 完成 |
+| T1 config + Keychain | 完成（config 单测；Keychain 待真机验证） |
+| T2 envelope + unary HTTP | 完成（17 个单测） |
+| T3 token→cookie 认证 | 完成（`dshg --probe <url>` 对真实 dsh 验证） |
+| T4 WS `/api/remote.mux` + `$events` ready | 下一步 |
+| T5 会话列表 + 引导 UI | 待开始 |
+
 ## 下一步
 
 1. 确认 [PARITY-TARGET 的 6 个问题](design/PARITY-TARGET.md#6-待拍板问题)

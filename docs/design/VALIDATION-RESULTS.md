@@ -69,6 +69,18 @@ new WebSocket(url, { headers: { Cookie: cookie } })
    - 补"绕过 `~/.local/bin/dsh` shim"的说明（shim 硬编码 `DSH_HOME=~/.dsh`）。
 3. `M0-DESIGN.md`：`session/list` 请求带 `_request`；Keychain 条目不变。
 
+## 端到端验证（dshg --probe）
+
+T1–T3 合并后，用 `./target/debug/dshg --probe "<url>"` 对真实 dsh 跑通：
+
+```
+[info] authenticated with dsh authority=127.0.0.1:53520 name=dsh-auth-<hash>
+[]
+```
+
+`[]` 是隔离 home 下的 `session/list` 结果；说明 URL 解析、token 交换、cookie 携带、
+unary 信封与 `_request` 参数全部正确。
+
 ## 未覆盖（M0 不阻塞）
 
 - V6 `session/follow` 帧序列、V7 审批往返、V8 重连 gap、V9 插件启停：需要真实模型与工具调用，

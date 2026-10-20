@@ -1,0 +1,76 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::connection::http::UnaryClient;
+use crate::error::AppError;
+
+/// One row of `session/list` (PROTOCOL.md §5). Titles are not part of this payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub session_id: String,
+    #[serde(default)]
+    pub updated_at: Option<Value>,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub blank: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub agent_available: Option<bool>,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SessionListValue {
+    #[serde(default)]
+    items: Vec<SessionSummary>,
+}
+
+/// `session/list` requires its single parameter to be named `_request` (measured).
+pub async fn session_list(client: &UnaryClient) -> Result<Vec<SessionSummary>, AppError> {
+    let value = client
+        .call("session/list", serde_json::json!({ "_request": {} }))
+        .await?;
+    let page: SessionListValue = serde_json::from_value(value)?;
+    Ok(page.items)
+}
+
+/// Lightweight readiness probe that every dsh 0.2.x build answers.
+pub async fn settings_describe(client: &UnaryClient) -> Result<Value, AppError> {
+    client.call("settings/describe", serde_json::json!({})).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_list_rows() {
+        let value = serde_json::json!({
+            "items": [{
+                "sessionId": "sess-1",
+                "updatedAt": 1750000000000_i64,
+                "running": false,
+                "blank": true,
+                "cwd": "/tmp/work"
+            }]
+        });
+        let page: SessionListValue = serde_json::from_value(value).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].session_id, "sess-1");
+        assert_eq!(page.items[0].cwd.as_deref(), Some("/tmp/work"));
+        assert!(page.items[0].parent_session_id.is_none());
+    }
+
+    #[test]
+    fn tolerates_unknown_fields() {
+        let value = serde_json::json!({
+            "items": [{"sessionId": "s", "projections": {"kind": "cached"}, "future": 1}]
+        });
+        let page: SessionListValue = serde_json::from_value(value).unwrap();
+        assert_eq!(page.items[0].session_id, "s");
+    }
+}
