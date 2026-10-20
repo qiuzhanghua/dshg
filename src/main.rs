@@ -1,3 +1,5 @@
+mod app;
+mod backend;
 mod config;
 mod connection;
 mod error;
@@ -8,39 +10,11 @@ use std::time::Duration;
 
 use gpui_kit::*;
 
-use crate::connection::auth::{self, AuthTarget};
+use crate::app::AppState;
+use crate::backend::authenticate;
 use crate::connection::http::UnaryClient;
 use crate::connection::ws;
 use crate::error::AppError;
-use crate::secrets::SessionCookie;
-
-struct Root;
-
-impl Render for Root {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child("dshg · M0")
-    }
-}
-
-fn http_client() -> Result<reqwest::Client, AppError> {
-    Ok(reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()?)
-}
-
-/// Parse the printed URL and exchange its token for a cookie.
-async fn authenticate(input: &str) -> Result<(AuthTarget, SessionCookie), AppError> {
-    let client = http_client()?;
-    let target = auth::parse_auth_url(input)?;
-    let cookie = auth::exchange_token(&client, &target).await?;
-    Ok((target, cookie))
-}
 
 fn run_probe(input: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -120,7 +94,9 @@ fn main() {
 
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Root))
-            .expect("failed to open window");
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| AppState::new(window, cx))
+        })
+        .expect("failed to open window");
     });
 }
