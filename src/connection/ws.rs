@@ -33,7 +33,7 @@ pub fn mux_url(base: &Url) -> Result<Url, AppError> {
     Ok(url)
 }
 
-fn map_ws_error(error: tungstenite::Error) -> AppError {
+pub(crate) fn map_ws_error(error: tungstenite::Error) -> AppError {
     match error {
         tungstenite::Error::Http(response) => match response.status() {
             reqwest::StatusCode::UNAUTHORIZED => AppError::Unauthorized,

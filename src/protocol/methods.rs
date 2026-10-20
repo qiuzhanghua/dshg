@@ -38,6 +38,24 @@ pub async fn session_list(client: &UnaryClient) -> Result<Vec<SessionSummary>, A
     Ok(page.items)
 }
 
+/// Create a session, optionally rooted at `cwd`, and return its id.
+pub async fn create_session(
+    client: &UnaryClient,
+    cwd: Option<&str>,
+) -> Result<String, AppError> {
+    let request = match cwd {
+        Some(cwd) => serde_json::json!({ "cwd": cwd }),
+        None => serde_json::json!({}),
+    };
+    let args = serde_json::json!({ "request": request });
+    let value = client.call("session/create", args).await?;
+    value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| AppError::Decode("session/create returned no sessionId".to_string()))
+}
+
 /// Lightweight readiness probe that every dsh 0.2.x build answers.
 pub async fn settings_describe(client: &UnaryClient) -> Result<Value, AppError> {
     client.call("settings/describe", serde_json::json!({})).await

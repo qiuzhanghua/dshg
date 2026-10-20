@@ -34,7 +34,10 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 | T2 envelope + unary HTTP | 完成（17 个单测） |
 | T3 token→cookie 认证 | 完成（`dshg --probe <url>` 对真实 dsh 验证） |
 | T4 WS `/api/remote.mux` + `$events` ready | 完成（`dshg --events` 对真实 dsh 验证） |
-| T5 会话列表 + 引导 UI | 完成（窗口可启动；点击流程待手工验收） |
+| T5 会话列表 + 引导 UI | 完成（已手工验收） |
+
+M1（只读回放）进行中：`session/follow` 快照 + Markdown/工具卡片渲染已完成；
+assistant 流式帧、gap 修复、虚拟化列表待做。
 
 ## 运行
 
