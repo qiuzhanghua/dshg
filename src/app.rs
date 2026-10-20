@@ -20,6 +20,7 @@ use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
 use dshg::protocol::plugins::{self, ChangeResult, Inventory};
+use dshg::protocol::credentials;
 use dshg::protocol::files::{self, DirectoryEntry, DirectoryListing, FileText};
 use dshg::protocol::settings::{self, NamespaceView, SettingsDescribe};
 use dshg::secrets::SessionCookie;
@@ -58,6 +59,8 @@ pub enum AppEvent {
         enabled: bool,
         result: ChangeResult,
     },
+    CredentialDone(String),
+    CredentialFailed(String),
     FilesLoaded(DirectoryListing),
     FileLoaded(FileText),
     FilesFailed(String),
@@ -118,6 +121,12 @@ pub struct AppState {
     plugins_loading: bool,
     plugins_error: Option<String>,
     plugins_notice: Option<String>,
+    credentials_open: bool,
+    cred_ref: Entity<InputState>,
+    cred_value: Entity<InputState>,
+    cred_status: Option<String>,
+    cred_error: Option<String>,
+    cred_busy: bool,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -138,6 +147,12 @@ impl AppState {
         });
         let prompt_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("输入消息，Enter 发送（M2）")
+        });
+        let cred_ref = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("凭据引用，如 DEEPSEEK_API_KEY")
+        });
+        let cred_value = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("写入值（不会回显）")
         });
         let settings_editor = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("选择命名空间后点「载入当前值」再编辑 JSON")
@@ -186,6 +201,12 @@ impl AppState {
             plugins_loading: false,
             plugins_error: None,
             plugins_notice: None,
+            credentials_open: false,
+            cred_ref,
+            cred_value,
+            cred_status: None,
+            cred_error: None,
+            cred_busy: false,
             following: None,
             base: None,
             cookie: None,
@@ -240,6 +261,9 @@ impl AppState {
                     }
                 })
                 .detach();
+                if std::env::var("DSHG_OPEN_CREDENTIALS").is_ok() {
+                    self.credentials_open = true;
+                }
                 if std::env::var("DSHG_OPEN_PLUGINS").is_ok() {
                     self.plugins_open = true;
                     self.load_plugins(cx);
@@ -380,6 +404,15 @@ impl AppState {
             AppEvent::FilesFailed(message) => {
                 self.files_loading = false;
                 self.files_error = Some(message);
+            }
+            AppEvent::CredentialDone(status) => {
+                self.cred_busy = false;
+                self.cred_error = None;
+                self.cred_status = Some(status);
+            }
+            AppEvent::CredentialFailed(message) => {
+                self.cred_busy = false;
+                self.cred_error = Some(message);
             }
             AppEvent::Failed { code, message } => {
                 self.phase = Phase::NeedsAuth;
@@ -623,6 +656,230 @@ impl AppState {
                 tx.send(AppEvent::SettingsFailed(error.to_string())).await.ok();
             }
         });
+    }
+
+    fn open_credentials(&mut self, cx: &mut Context<Self>) {
+        self.credentials_open = true;
+        self.cred_error = None;
+        cx.notify();
+    }
+
+    fn check_credential(&mut self, cx: &mut Context<Self>) {
+        let reference = self.cred_ref.read(cx).value().to_string();
+        if reference.trim().is_empty() {
+            self.cred_error = Some("请填写凭据引用".to_string());
+            cx.notify();
+            return;
+        }
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        self.cred_busy = true;
+        self.cred_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                credentials::describe(&client, vec![reference.clone()]).await
+            }
+            .await;
+            let event = match result {
+                Ok(map) => {
+                    let status = map
+                        .get(&reference)
+                        .map(|info| {
+                            if info.configured {
+                                format!(
+                                    "已配置（来源：{}）",
+                                    info.source.clone().unwrap_or_else(|| "未知".to_string())
+                                )
+                            } else {
+                                "未配置".to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| "未配置".to_string());
+                    AppEvent::CredentialDone(status)
+                }
+                Err(error) => AppEvent::CredentialFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn write_credential(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reference = self.cred_ref.read(cx).value().to_string();
+        let secret = self.cred_value.read(cx).value().to_string();
+        if reference.trim().is_empty() || secret.is_empty() {
+            self.cred_error = Some("引用和值都不能为空".to_string());
+            cx.notify();
+            return;
+        }
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        self.cred_busy = true;
+        self.cred_error = None;
+        cx.notify();
+        self.cred_value
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                credentials::set(&client, &reference, &secret).await
+            }
+            .await;
+            let event = match result {
+                Ok(()) => AppEvent::CredentialDone("已写入".to_string()),
+                Err(error) => AppEvent::CredentialFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn clear_credential(&mut self, cx: &mut Context<Self>) {
+        let reference = self.cred_ref.read(cx).value().to_string();
+        if reference.trim().is_empty() {
+            self.cred_error = Some("请填写凭据引用".to_string());
+            cx.notify();
+            return;
+        }
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        self.cred_busy = true;
+        self.cred_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                credentials::unset(&client, &reference).await
+            }
+            .await;
+            let event = match result {
+                Ok(()) => AppEvent::CredentialDone("已清除".to_string()),
+                Err(error) => AppEvent::CredentialFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn render_credentials(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        border: Hsla,
+        accent: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .w(px(620.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child("凭据引用由插件配置决定（如 DEEPSEEK_API_KEY / <ROUTE>_API_KEY）；值写入后不会回显。"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().text_size(px(11.)).child("引用"))
+                    .child(Input::new(&self.cred_ref).w_full()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().text_size(px(11.)).child("值"))
+                    .child(Input::new(&self.cred_value).w_full()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("cred-check")
+                            .compact()
+                            .label("查询")
+                            .disabled(self.cred_busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.check_credential(cx))),
+                    )
+                    .child(
+                        Button::new("cred-save")
+                            .primary()
+                            .compact()
+                            .label("写入")
+                            .disabled(self.cred_busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.write_credential(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("cred-unset")
+                            .compact()
+                            .label("清除")
+                            .disabled(self.cred_busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_credential(cx))),
+                    ),
+            );
+        if let Some(status) = &self.cred_status {
+            column = column.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(status.clone()),
+            );
+        }
+        if let Some(error) = &self.cred_error {
+            column = column.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(danger)
+                    .child(error.clone()),
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .border_b(px(1.))
+                    .border_color(border)
+                    .child(div().text_size(px(15.)).child("凭据"))
+                    .child(
+                        Button::new("cred-close")
+                            .compact()
+                            .label("返回")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.credentials_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .p(px(16.))
+                    .child(column),
+            )
+            .into_any_element()
     }
 
     fn open_plugins(&mut self, cx: &mut Context<Self>) {
@@ -1577,6 +1834,12 @@ impl AppState {
                                     .child(format!("{} 个会话", self.sessions.len())),
                             )
                             .child(
+                                Button::new("open-credentials")
+                                    .compact()
+                                    .label("凭据")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_credentials(cx))),
+                            )
+                            .child(
                                 Button::new("open-plugins")
                                     .compact()
                                     .label("插件")
@@ -2044,7 +2307,9 @@ impl Render for AppState {
         let danger = colors.danger;
         let success = colors.success;
 
-        let body = if self.plugins_open {
+        let body = if self.credentials_open {
+            self.render_credentials(cx, muted, border, accent, danger)
+        } else if self.plugins_open {
             self.render_plugins(cx, muted, border, accent, danger)
         } else if self.show_settings {
             self.render_settings(cx, muted, border, accent, danger)

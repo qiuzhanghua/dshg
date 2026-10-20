@@ -66,6 +66,45 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     })
 }
 
+fn run_cred_check(input: &str, reference: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let map = dshg::protocol::credentials::describe(&unary, vec![reference.to_string()]).await?;
+        println!("{}", serde_json::to_string_pretty(&map)?);
+        Ok(())
+    })
+}
+
+fn run_cred_set(input: &str, reference: &str, secret: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        dshg::protocol::credentials::set(&unary, reference, secret).await?;
+        println!("set ok");
+        Ok(())
+    })
+}
+
+fn run_cred_unset(input: &str, reference: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        dshg::protocol::credentials::unset(&unary, reference).await?;
+        println!("unset ok");
+        Ok(())
+    })
+}
+
 fn run_plugins(input: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -222,6 +261,39 @@ fn main() {
                 std::process::exit(2);
             };
             if let Err(error) = run_settings(url) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--cred-check") => {
+            let (Some(url), Some(reference)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: dshg --cred-check <url> <ref>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_cred_check(url, reference) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--cred-set") => {
+            let (Some(url), Some(reference), Some(secret)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: dshg --cred-set <url> <ref> <secret>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_cred_set(url, reference, secret) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--cred-unset") => {
+            let (Some(url), Some(reference)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: dshg --cred-unset <url> <ref>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_cred_unset(url, reference) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

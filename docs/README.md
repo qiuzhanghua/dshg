@@ -48,6 +48,9 @@ P1 设置页：命名空间列表、值 JSON、`applies/revision`、凭据槽位
 **编辑**（JSON 合并保存 + `expectedRevision` 冲突提示）已接；`--settings` / `--settings-set` CLI 可验证。
 凭据写入（`credentials/set`）未接。
 
+凭据面板：`credentials/describe` / `set` / `unset`（写入后不回显；引用名由插件配置决定）。
+`--cred-check` / `--cred-set` / `--cred-unset` CLI 可验证。
+
 插件面板：`pluginInventory/list` 清单 + `pluginManager/setPluginEnabled` 启停；
 按 `ChangeResult.application` 提示（applied/restart-required/overridden/failed/cancelled）。
 `--plugins` / `--plugin-toggle` CLI 可验证。
