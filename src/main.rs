@@ -66,6 +66,32 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     })
 }
 
+fn run_plugins(input: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let inventory = dshg::protocol::plugins::inventory(&unary).await?;
+        println!("{}", serde_json::to_string_pretty(&inventory)?);
+        Ok(())
+    })
+}
+
+fn run_plugin_toggle(input: &str, id: &str, enabled: bool) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let change = dshg::protocol::plugins::set_enabled(&unary, id, enabled).await?;
+        println!("{}", serde_json::to_string_pretty(&change)?);
+        Ok(())
+    })
+}
+
 fn run_files(input: &str, session_id: &str, path: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -196,6 +222,29 @@ fn main() {
                 std::process::exit(2);
             };
             if let Err(error) = run_settings(url) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--plugins") => {
+            let Some(url) = args.get(2) else {
+                eprintln!("usage: dshg --plugins <url>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_plugins(url) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--plugin-toggle") => {
+            let (Some(url), Some(id), Some(enabled)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: dshg --plugin-toggle <url> <entryId> <true|false>");
+                std::process::exit(2);
+            };
+            let enabled = enabled == "true";
+            if let Err(error) = run_plugin_toggle(url, id, enabled) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

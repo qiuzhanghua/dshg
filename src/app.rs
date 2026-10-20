@@ -19,6 +19,7 @@ use dshg::connection::events::{self, EventsMessage};
 use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
+use dshg::protocol::plugins::{self, ChangeResult, Inventory};
 use dshg::protocol::files::{self, DirectoryEntry, DirectoryListing, FileText};
 use dshg::protocol::settings::{self, NamespaceView, SettingsDescribe};
 use dshg::secrets::SessionCookie;
@@ -50,6 +51,13 @@ pub enum AppEvent {
     SettingsFailed(String),
     SettingsSaved(NamespaceView),
     SettingsSaveFailed(String),
+    PluginsLoaded(Inventory),
+    PluginsFailed(String),
+    PluginChanged {
+        entry_id: String,
+        enabled: bool,
+        result: ChangeResult,
+    },
     FilesLoaded(DirectoryListing),
     FileLoaded(FileText),
     FilesFailed(String),
@@ -105,6 +113,11 @@ pub struct AppState {
     files_error: Option<String>,
     files_loading: bool,
     following_cwd: Option<String>,
+    plugins_open: bool,
+    plugins: Option<Inventory>,
+    plugins_loading: bool,
+    plugins_error: Option<String>,
+    plugins_notice: Option<String>,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -168,6 +181,11 @@ impl AppState {
             files_error: None,
             files_loading: false,
             following_cwd: None,
+            plugins_open: false,
+            plugins: None,
+            plugins_loading: false,
+            plugins_error: None,
+            plugins_notice: None,
             following: None,
             base: None,
             cookie: None,
@@ -222,6 +240,10 @@ impl AppState {
                     }
                 })
                 .detach();
+                if std::env::var("DSHG_OPEN_PLUGINS").is_ok() {
+                    self.plugins_open = true;
+                    self.load_plugins(cx);
+                }
                 if std::env::var("DSHG_OPEN_SETTINGS").is_ok() {
                     self.show_settings = true;
                     self.load_settings(cx);
@@ -302,6 +324,48 @@ impl AppState {
                     ""
                 };
                 self.settings_error = Some(format!("{message}{hint}"));
+            }
+            AppEvent::PluginsLoaded(inventory) => {
+                self.plugins_loading = false;
+                self.plugins_error = None;
+                self.plugins = Some(inventory);
+            }
+            AppEvent::PluginsFailed(message) => {
+                self.plugins_loading = false;
+                self.plugins_error = Some(message);
+            }
+            AppEvent::PluginChanged {
+                entry_id,
+                enabled,
+                result,
+            } => {
+                self.plugins_loading = false;
+                let application = result.application.clone().unwrap_or_default();
+                if let Some(inventory) = &mut self.plugins
+                    && let Some(entry) = inventory
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.entry_id.as_deref() == Some(entry_id.as_str()))
+                {
+                    entry.enabled = enabled;
+                }
+                match application.as_str() {
+                    "applied" => self.plugins_notice = Some("已生效".to_string()),
+                    "restart-required" => {
+                        self.plugins_notice = Some("已保存，需要重启 dsh 生效".to_string())
+                    }
+                    "overridden" => {
+                        self.plugins_notice =
+                            Some("被更高优先级配置覆盖，未生效".to_string())
+                    }
+                    "failed" => {
+                        self.plugins_error = Some(format!("操作失败：{:?}", result.error))
+                    }
+                    "cancelled" => self.plugins_notice = Some("已取消".to_string()),
+                    other => {
+                        self.plugins_notice = Some(format!("结果：{other}"));
+                    }
+                }
             }
             AppEvent::FilesLoaded(listing) => {
                 self.files_loading = false;
@@ -559,6 +623,197 @@ impl AppState {
                 tx.send(AppEvent::SettingsFailed(error.to_string())).await.ok();
             }
         });
+    }
+
+    fn open_plugins(&mut self, cx: &mut Context<Self>) {
+        self.plugins_open = true;
+        self.plugins_error = None;
+        cx.notify();
+        if self.plugins.is_none() && !self.plugins_loading {
+            self.load_plugins(cx);
+        }
+    }
+
+    fn load_plugins(&mut self, cx: &mut Context<Self>) {
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            self.plugins_error = Some("尚未连接引擎".to_string());
+            cx.notify();
+            return;
+        };
+        self.plugins_loading = true;
+        self.plugins_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                plugins::inventory(&client).await
+            }
+            .await;
+            let event = match result {
+                Ok(inventory) => AppEvent::PluginsLoaded(inventory),
+                Err(error) => AppEvent::PluginsFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn toggle_plugin(&mut self, entry_id: String, enabled: bool, cx: &mut Context<Self>) {
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        self.plugins_loading = true;
+        self.plugins_error = None;
+        self.plugins_notice = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                plugins::set_enabled(&client, &entry_id, enabled).await
+            }
+            .await;
+            let event = match result {
+                Ok(result) => AppEvent::PluginChanged {
+                    entry_id,
+                    enabled,
+                    result,
+                },
+                Err(error) => AppEvent::PluginsFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn render_plugins(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        border: Hsla,
+        accent: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        let mut rows = div().flex().flex_col().gap(px(4.));
+        if let Some(inventory) = &self.plugins {
+            if self.plugins_loading {
+                rows = rows.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child("处理中…"),
+                );
+            }
+            for entry in &inventory.entries {
+                let Some(entry_id) = entry.entry_id.clone() else {
+                    continue;
+                };
+                let enabled = entry.enabled;
+                let name = entry.display_name();
+                let phase = entry.fiber_phase.clone().unwrap_or_default();
+                let target = entry_id.clone();
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded_md()
+                        .border(px(1.))
+                        .border_color(border)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(div().text_size(px(12.)).child(name))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(muted)
+                                        .child(format!(
+                                            "{entry_id} · {phase} · {}",
+                                            if enabled { "启用" } else { "禁用" }
+                                        )),
+                                ),
+                        )
+                        .child(
+                            Button::new(format!("plugin-{entry_id}"))
+                                .compact()
+                                .label(if enabled { "禁用" } else { "启用" })
+                                .disabled(self.plugins_loading)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_plugin(target.clone(), !enabled, cx);
+                                })),
+                        ),
+                );
+            }
+        }
+        if let Some(notice) = &self.plugins_notice {
+            rows = rows.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(notice.clone()),
+            );
+        }
+        if let Some(error) = &self.plugins_error {
+            rows = rows.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(danger)
+                    .child(error.clone()),
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .border_b(px(1.))
+                    .border_color(border)
+                    .child(div().text_size(px(15.)).child("插件"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("plugins-refresh")
+                                    .compact()
+                                    .label("刷新")
+                                    .disabled(self.plugins_loading)
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_plugins(cx))),
+                            )
+                            .child(
+                                Button::new("plugins-close")
+                                    .compact()
+                                    .label("返回")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.plugins_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scrollbar()
+                    .p(px(12.))
+                    .child(rows),
+            )
+            .into_any_element()
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -1322,6 +1577,12 @@ impl AppState {
                                     .child(format!("{} 个会话", self.sessions.len())),
                             )
                             .child(
+                                Button::new("open-plugins")
+                                    .compact()
+                                    .label("插件")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_plugins(cx))),
+                            )
+                            .child(
                                 Button::new("toggle-files")
                                     .compact()
                                     .label(if self.files_open { "隐藏文件" } else { "文件" })
@@ -1783,7 +2044,9 @@ impl Render for AppState {
         let danger = colors.danger;
         let success = colors.success;
 
-        let body = if self.show_settings {
+        let body = if self.plugins_open {
+            self.render_plugins(cx, muted, border, accent, danger)
+        } else if self.show_settings {
             self.render_settings(cx, muted, border, accent, danger)
         } else if self.phase == Phase::Ready {
             self.render_shell(cx, muted, border, accent, success, danger)
