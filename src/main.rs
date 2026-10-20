@@ -66,6 +66,19 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     })
 }
 
+fn run_settings(input: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let describe = dshg::protocol::settings::describe(&unary).await?;
+        println!("{}", serde_json::to_string_pretty(&describe)?);
+        Ok(())
+    })
+}
+
 fn run_prompt(input: &str, session_id: &str, text: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -138,6 +151,17 @@ fn main() {
             };
             let cwd = args.get(3).map(String::as_str);
             if let Err(error) = run_create(url, cwd) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--settings") => {
+            let Some(url) = args.get(2) else {
+                eprintln!("usage: dshg --settings <dsh-web-url>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_settings(url) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

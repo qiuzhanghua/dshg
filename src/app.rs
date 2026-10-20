@@ -19,6 +19,7 @@ use dshg::connection::events::{self, EventsMessage};
 use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
+use dshg::protocol::settings::{self, SettingsDescribe};
 use dshg::secrets::SessionCookie;
 use dshg::transcript::{
     apply_events, diffs_from_meta, parse_frame, tool_summary, FileDiff, TranscriptEvent,
@@ -44,6 +45,8 @@ pub enum AppEvent {
         ok: bool,
         message: Option<String>,
     },
+    SettingsLoaded(SettingsDescribe),
+    SettingsFailed(String),
     Failed {
         code: String,
         message: String,
@@ -81,6 +84,11 @@ pub struct AppState {
     prompt_input: Entity<InputState>,
     sending: bool,
     notice: Option<String>,
+    show_settings: bool,
+    settings: Option<SettingsDescribe>,
+    settings_selected: usize,
+    settings_loading: bool,
+    settings_error: Option<String>,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -126,6 +134,11 @@ impl AppState {
             prompt_input,
             sending: false,
             notice: None,
+            show_settings: false,
+            settings: None,
+            settings_selected: 0,
+            settings_loading: false,
+            settings_error: None,
             following: None,
             base: None,
             cookie: None,
@@ -180,6 +193,10 @@ impl AppState {
                     }
                 })
                 .detach();
+                if std::env::var("DSHG_OPEN_SETTINGS").is_ok() {
+                    self.show_settings = true;
+                    self.load_settings(cx);
+                }
                 if let Ok(session_id) = std::env::var("DSHG_OPEN_SESSION")
                     && self.sessions.iter().any(|s| s.session_id == session_id)
                 {
@@ -224,6 +241,16 @@ impl AppState {
                 if !ok {
                     self.notice = message;
                 }
+            }
+            AppEvent::SettingsLoaded(settings) => {
+                self.settings_loading = false;
+                self.settings_error = None;
+                self.settings = Some(settings);
+                self.settings_selected = 0;
+            }
+            AppEvent::SettingsFailed(message) => {
+                self.settings_loading = false;
+                self.settings_error = Some(message);
             }
             AppEvent::Failed { code, message } => {
                 self.phase = Phase::NeedsAuth;
@@ -419,6 +446,276 @@ impl AppState {
         column.into_any_element()
     }
 
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.show_settings = true;
+        self.settings_error = None;
+        cx.notify();
+        if self.settings.is_none() && !self.settings_loading {
+            self.load_settings(cx);
+        }
+    }
+
+    fn load_settings(&mut self, cx: &mut Context<Self>) {
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            self.settings_error = Some("尚未连接引擎".to_string());
+            cx.notify();
+            return;
+        };
+        self.settings_loading = true;
+        self.settings_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                settings::describe(&client).await
+            }
+            .await;
+            let event = match result {
+                Ok(settings) => AppEvent::SettingsLoaded(settings),
+                Err(error) => AppEvent::SettingsFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn open_settings_document(&mut self, cx: &mut Context<Self>) {
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                settings::open_document(&client).await
+            }
+            .await;
+            if let Err(error) = result {
+                tx.send(AppEvent::SettingsFailed(error.to_string())).await.ok();
+            }
+        });
+    }
+
+    fn render_settings(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        border: Hsla,
+        accent: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        let writable = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.writable)
+            .unwrap_or(false);
+        let mut list = div().flex().flex_col().gap(px(4.));
+        if let Some(settings) = &self.settings {
+            for (index, namespace) in settings.namespaces.iter().enumerate() {
+                let selected = index == self.settings_selected;
+                list = list.child(
+                    div()
+                        .id(ElementId::Name(format!("settings-ns-{index}").into()))
+                        .px(px(8.))
+                        .py(px(6.))
+                        .rounded_md()
+                        .border(px(1.))
+                        .border_color(if selected { accent } else { border })
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings_selected = index;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .child(namespace.ns.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(muted)
+                                .child(format!(
+                                    "{} · rev {}",
+                                    namespace.applies, namespace.revision
+                                )),
+                        ),
+                );
+            }
+        }
+
+        let mut detail = div().flex().flex_col().gap(px(8.));
+        if let Some(settings) = &self.settings {
+            if let Some(namespace) = settings.namespaces.get(self.settings_selected) {
+                detail = detail
+                    .child(div().text_size(px(16.)).child(namespace.ns.clone()))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!(
+                                "applies: {} · revision: {}",
+                                namespace.applies, namespace.revision
+                            )),
+                    );
+                if !namespace.secrets.is_empty() {
+                    let mut secrets = div().flex().flex_col().gap(px(2.));
+                    for secret in &namespace.secrets {
+                        secrets = secrets.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(format!(
+                                    "secret {}: {}",
+                                    secret.path.join("."),
+                                    if secret.set { "已配置" } else { "未配置" }
+                                )),
+                        );
+                    }
+                    detail = detail.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .p(px(8.))
+                            .rounded_md()
+                            .border(px(1.))
+                            .border_color(border)
+                            .child(div().text_size(px(11.)).child("凭据槽位"))
+                            .child(secrets),
+                    );
+                }
+                let pretty = serde_json::to_string_pretty(&namespace.value)
+                    .unwrap_or_else(|_| "{}".to_string());
+                detail = detail.child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scrollbar()
+                        .p(px(8.))
+                        .rounded_md()
+                        .border(px(1.))
+                        .border_color(border)
+                        .child(div().text_size(px(11.)).child(pretty)),
+                );
+            }
+        } else if self.settings_loading {
+            detail = detail.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child("读取设置…"),
+            );
+        }
+
+        if let Some(error) = &self.settings_error {
+            detail = detail.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(danger)
+                    .child(error.clone()),
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .border_b(px(1.))
+                    .border_color(border)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().text_size(px(15.)).child("设置"))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(if writable { "可写" } else { "只读" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("settings-refresh")
+                                    .compact()
+                                    .label("刷新")
+                                    .disabled(self.settings_loading)
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_settings(cx))),
+                            )
+                            .child(
+                                Button::new("settings-doc")
+                                    .compact()
+                                    .label("打开设置文档")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.open_settings_document(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("settings-close")
+                                    .compact()
+                                    .label("返回")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_settings = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(
+                        div()
+                            .w(px(260.))
+                            .flex()
+                            .flex_col()
+                            .p(px(10.))
+                            .gap(px(4.))
+                            .border_r(px(1.))
+                            .border_color(border)
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child("命名空间"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .overflow_y_scrollbar()
+                                    .child(list),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .p(px(12.))
+                            .child(detail),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn send(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.sending {
             return;
@@ -598,9 +895,24 @@ impl AppState {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child(format!("{} 个会话", self.sessions.len())),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(muted)
+                                    .child(format!("{} 个会话", self.sessions.len())),
+                            )
+                            .child(
+                                Button::new("open-settings")
+                                    .compact()
+                                    .label("设置")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.open_settings(cx)),
+                                    ),
+                            ),
                     ),
             )
             .child(
@@ -1044,7 +1356,9 @@ impl Render for AppState {
         let danger = colors.danger;
         let success = colors.success;
 
-        let body = if self.phase == Phase::Ready {
+        let body = if self.show_settings {
+            self.render_settings(cx, muted, border, accent, danger)
+        } else if self.phase == Phase::Ready {
             self.render_shell(cx, muted, border, accent, success, danger)
         } else {
             self.render_onboarding(cx, muted, danger)
