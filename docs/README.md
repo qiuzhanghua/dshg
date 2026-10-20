@@ -48,6 +48,9 @@ P1 设置页：命名空间列表、值 JSON、`applies/revision`、凭据槽位
 **编辑**（JSON 合并保存 + `expectedRevision` 冲突提示）已接；`--settings` / `--settings-set` CLI 可验证。
 凭据写入（`credentials/set`）未接。
 
+文件侧栏（只读）：`workspaceFiles/list` 目录树、`read` 文本预览、面包屑、上级/刷新；
+根目录用 `.`（空字符串会被引擎拒绝）；文件监听（`changes`）与 diff 视图未做。
+
 工具卡片：按 callId 配对调用/结果；bash/read/grep/glob/web 参数摘要；运行中/成功/错误状态；
 长结果展开/收起与复制；`tool/result.meta` 里的 fs diff 渲染为红绿行。
 演示：`DSHG_DEMO_TRANSCRIPT=1 cargo run` 可看一张带 diff 的示例卡片。

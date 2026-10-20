@@ -19,6 +19,7 @@ use dshg::connection::events::{self, EventsMessage};
 use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
+use dshg::protocol::files::{self, DirectoryEntry, DirectoryListing, FileText};
 use dshg::protocol::settings::{self, NamespaceView, SettingsDescribe};
 use dshg::secrets::SessionCookie;
 use dshg::transcript::{
@@ -49,6 +50,9 @@ pub enum AppEvent {
     SettingsFailed(String),
     SettingsSaved(NamespaceView),
     SettingsSaveFailed(String),
+    FilesLoaded(DirectoryListing),
+    FileLoaded(FileText),
+    FilesFailed(String),
     Failed {
         code: String,
         message: String,
@@ -94,6 +98,13 @@ pub struct AppState {
     settings_error: Option<String>,
     settings_notice: Option<String>,
     settings_editor: Entity<TextareaState>,
+    files_open: bool,
+    files_dir: Vec<String>,
+    files_listing: Option<DirectoryListing>,
+    file_preview: Option<FileText>,
+    files_error: Option<String>,
+    files_loading: bool,
+    following_cwd: Option<String>,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -150,6 +161,13 @@ impl AppState {
             settings_error: None,
             settings_notice: None,
             settings_editor,
+            files_open: false,
+            files_dir: Vec::new(),
+            files_listing: None,
+            file_preview: None,
+            files_error: None,
+            files_loading: false,
+            following_cwd: None,
             following: None,
             base: None,
             cookie: None,
@@ -284,6 +302,20 @@ impl AppState {
                     ""
                 };
                 self.settings_error = Some(format!("{message}{hint}"));
+            }
+            AppEvent::FilesLoaded(listing) => {
+                self.files_loading = false;
+                self.files_error = None;
+                self.files_listing = Some(listing);
+            }
+            AppEvent::FileLoaded(file) => {
+                self.files_loading = false;
+                self.files_error = None;
+                self.file_preview = Some(file);
+            }
+            AppEvent::FilesFailed(message) => {
+                self.files_loading = false;
+                self.files_error = Some(message);
             }
             AppEvent::Failed { code, message } => {
                 self.phase = Phase::NeedsAuth;
@@ -529,6 +561,87 @@ impl AppState {
         });
     }
 
+    fn toggle_files(&mut self, cx: &mut Context<Self>) {
+        self.files_open = !self.files_open;
+        if self.files_open && self.following.is_some() && self.files_listing.is_none() {
+            self.load_files(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_files(&mut self, cx: &mut Context<Self>) {
+        let (Some(session_id), Some(base), Some(cookie)) = (
+            self.following.clone(),
+            self.base.clone(),
+            self.cookie.clone(),
+        ) else {
+            return;
+        };
+        let path = if self.files_dir.is_empty() {
+            ".".to_string()
+        } else {
+            self.files_dir.join("/")
+        };
+        self.files_loading = true;
+        self.files_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                files::list(&client, &session_id, &path).await
+            }
+            .await;
+            let event = match result {
+                Ok(listing) => AppEvent::FilesLoaded(listing),
+                Err(error) => AppEvent::FilesFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn open_entry(&mut self, entry: &DirectoryEntry, cx: &mut Context<Self>) {
+        if entry.kind == "directory" {
+            self.files_dir.push(entry.name.clone());
+            self.file_preview = None;
+            self.load_files(cx);
+            return;
+        }
+        if entry.kind != "file" {
+            return;
+        }
+        let (Some(session_id), Some(base), Some(cookie), Some(cwd)) = (
+            self.following.clone(),
+            self.base.clone(),
+            self.cookie.clone(),
+            self.following_cwd.clone(),
+        ) else {
+            return;
+        };
+        let mut relative = self.files_dir.join("/");
+        if !relative.is_empty() {
+            relative.push('/');
+        }
+        relative.push_str(&entry.name);
+        let absolute = format!("{}/{}", cwd.trim_end_matches('/'), relative);
+        self.files_loading = true;
+        self.files_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                files::read(&client, &session_id, &absolute, Some(1), Some(600)).await
+            }
+            .await;
+            let event = match result {
+                Ok(file) => AppEvent::FileLoaded(file),
+                Err(error) => AppEvent::FilesFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
     fn load_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(settings) = &self.settings else {
             return;
@@ -592,6 +705,140 @@ impl AppState {
             };
             tx.send(event).await.ok();
         });
+    }
+
+    fn render_files(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        border: Hsla,
+        accent: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        let mut entries = div().flex().flex_col().gap(px(1.));
+        if let Some(listing) = &self.files_listing {
+            for entry in &listing.entries {
+                let prefix = if entry.kind == "directory" { "▸" } else { "·" };
+                let entry = entry.clone();
+                entries = entries.child(
+                    div()
+                        .id(ElementId::Name(format!("file-{}", entry.name).into()))
+                        .px(px(6.))
+                        .py(px(3.))
+                        .rounded(px(3.))
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .child(format!("{prefix} {}", entry.name))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_entry(&entry, cx);
+                        })),
+                );
+            }
+            if self.files_loading {
+                entries = entries.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child("加载中…"),
+                );
+            }
+        }
+
+        let breadcrumb = if self.files_dir.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", self.files_dir.join("/"))
+        };
+
+        let mut preview = div().flex().flex_col().gap(px(4.));
+        if let Some(file) = &self.file_preview {
+            preview = preview.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .child(file.absolute_path.clone()),
+            );
+            preview = preview.child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scrollbar()
+                    .child(div().text_size(px(10.)).child(file.text.clone())),
+            );
+        }
+
+        div()
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .border_l(px(1.))
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .border_b(px(1.))
+                    .border_color(border)
+                    .child(div().text_size(px(12.)).child(breadcrumb))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.))
+                            .child(
+                                Button::new("files-up")
+                                    .compact()
+                                    .label("..")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.files_dir.pop();
+                                        this.file_preview = None;
+                                        this.load_files(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("files-refresh")
+                                    .compact()
+                                    .label("刷新")
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_files(cx))),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scrollbar()
+                    .p(px(6.))
+                    .child(entries),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .border_t(px(1.))
+                    .border_color(border)
+                    .p(px(6.))
+                    .child(preview),
+            )
+            .children(
+                self.files_error
+                    .as_ref()
+                    .map(|error| {
+                        div()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .text_size(px(10.))
+                            .text_color(danger)
+                            .child(error.clone())
+                    })
+                    .into_iter(),
+            )
+            .into_any_element()
     }
 
     fn render_settings(
@@ -921,7 +1168,22 @@ impl AppState {
         }
         self.transcript.clear();
         self.following = Some(session_id.clone());
+        self.following_cwd = self
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .and_then(|session| session.cwd.clone());
+        self.files_dir.clear();
+        self.files_listing = None;
+        self.file_preview = None;
+        self.files_error = None;
         cx.notify();
+        if std::env::var("DSHG_OPEN_FILES").is_ok() {
+            self.files_open = true;
+        }
+        if self.files_open {
+            self.load_files(cx);
+        }
 
         let (frame_tx, frame_rx) = async_channel::unbounded::<Value>();
         self.follow_task = Some(backend::runtime().spawn(async move {
@@ -1060,6 +1322,12 @@ impl AppState {
                                     .child(format!("{} 个会话", self.sessions.len())),
                             )
                             .child(
+                                Button::new("toggle-files")
+                                    .compact()
+                                    .label(if self.files_open { "隐藏文件" } else { "文件" })
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_files(cx))),
+                            )
+                            .child(
                                 Button::new("open-settings")
                                     .compact()
                                     .label("设置")
@@ -1105,9 +1373,14 @@ impl AppState {
                             .flex_col()
                             .min_h(px(0.))
                             .child(self.render_transcript(cx, muted, accent, success, danger))
-                        .child(self.render_approvals(cx, border, accent, muted))
-                        .child(self.render_composer(cx, muted, border, danger)),
-                    ),
+                            .child(self.render_approvals(cx, border, accent, muted))
+                            .child(self.render_composer(cx, muted, border, danger)),
+                    )
+                    .child(if self.files_open {
+                        self.render_files(cx, muted, border, accent, danger)
+                    } else {
+                        div().into_any_element()
+                    }),
             )
             .into_any_element()
     }

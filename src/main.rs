@@ -66,6 +66,19 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     })
 }
 
+fn run_files(input: &str, session_id: &str, path: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let listing = dshg::protocol::files::list(&unary, session_id, path).await?;
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        Ok(())
+    })
+}
+
 fn run_settings_set(input: &str, ns: &str, json: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -183,6 +196,18 @@ fn main() {
                 std::process::exit(2);
             };
             if let Err(error) = run_settings(url) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--files") => {
+            let (Some(url), Some(session_id)) = (args.get(2), args.get(3)) else {
+                eprintln!("usage: dshg --files <url> <sessionId> [path]");
+                std::process::exit(2);
+            };
+            let path = args.get(4).map(String::as_str).unwrap_or("");
+            if let Err(error) = run_files(url, session_id, path) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }
