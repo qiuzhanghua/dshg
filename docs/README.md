@@ -33,8 +33,8 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 | T1 config + Keychain | 完成（config 单测；Keychain 待真机验证） |
 | T2 envelope + unary HTTP | 完成（17 个单测） |
 | T3 token→cookie 认证 | 完成（`dshg --probe <url>` 对真实 dsh 验证） |
-| T4 WS `/api/remote.mux` + `$events` ready | 下一步 |
-| T5 会话列表 + 引导 UI | 待开始 |
+| T4 WS `/api/remote.mux` + `$events` ready | 完成（`dshg --events` 对真实 dsh 验证） |
+| T5 会话列表 + 引导 UI | 下一步 |
 
 ## 下一步
 

@@ -81,6 +81,14 @@ T1–T3 合并后，用 `./target/debug/dshg --probe "<url>"` 对真实 dsh 跑�
 `[]` 是隔离 home 下的 `session/list` 结果；说明 URL 解析、token 交换、cookie 携带、
 unary 信封与 `_request` 参数全部正确。
 
+`./target/debug/dshg --events "<url>"` 进一步验证 WS：
+
+```json
+{ "clientId": "0e47f2e9-ca25-4254-a5f4-fbba8750f6de", "home": "/Users/daniel" }
+```
+
+即：cookie 能完成 `/api/remote.mux` 升级，`$events` 能拿到 ready 帧。
+
 ## 未覆盖（M0 不阻塞）
 
 - V6 `session/follow` 帧序列、V7 审批往返、V8 重连 gap、V9 插件启停：需要真实模型与工具调用，
