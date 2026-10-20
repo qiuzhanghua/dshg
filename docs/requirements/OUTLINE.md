@@ -144,4 +144,4 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 4. 评审 SPEC / PROTOCOL / PARITY → 排 M0 任务；M0 前先做协议实测
    （`docs/design/VALIDATION.md`：token→cookie、WS upgrade、session/follow、审批往返、插件启停），
    仍不写产品代码。
-5. 评审通过并完成实测后，再开始编码。
+5. 评审通过并完成实测后，再开始编码；M0 任务拆分见 `docs/design/M0-DESIGN.md`。
