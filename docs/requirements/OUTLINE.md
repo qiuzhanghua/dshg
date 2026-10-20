@@ -1,6 +1,6 @@
 # dshg 需求纲要（一页纸）
 
-- 版本：v0.4 草案
+- 版本：v0.5 草案
 - 日期：2026-10-20
 - 状态：方向已确认（首版仅 macOS、attach 外部 dsh 引擎、与官方 Web UI 长期并存、
   GUI 内可启停插件、不做远程连接、MVP 不含终端与文件编辑）；
@@ -64,10 +64,13 @@
   - 连接管理：设置里可改地址；启动时探测，未连接时给引导（复制启动命令、重新粘贴 URL、重试）；
     断线自动重连；协议无版本协商，端点缺失时按"能力缺失"降级并提示。
   - 安全边界：只连本机 loopback（dsh 默认禁止 `0.0.0.0`）；不做远程 attach。
-- 为什么不走另外两条路：
-  - `dsh-sdk-protocol`（stdio JSON-RPC）只有 `initialize` / `session/prompt` / `shutdown`
+- 为什么不走另外几条路（详见 `docs/design/INTEGRATION-MODES.md`）：
+  - `headless`：一次性任务，无追问/审批/会话列表；
+  - `dsh-sdk-protocol`（stdio JSON-RPC）：只有 `initialize` / `session/prompt` / `shutdown`
     三个请求，撑不起完整 GUI；
-  - `dsh-acp` 是 automation-only，用于被别的 agent 驱动，不适合做交互式 UI。
+  - `dsh-acp`：标准协议且有权限请求，但 automation-only、只发已提交消息（无 token 级流式），
+    且没有 DSH 的 plan/todo/文件/设置/插件呈现；
+  - 三者都是 stdio，必须由 dshg spawn 引擎，与"attach 已运行实例"冲突。
 - 协议类型：从 dsh 的 TS 类型/协议定义生成 Rust 类型（或手写 + 契约测试），
   以官方 Web 前端的 `dsh-client-ui-*` 包行为作为参考实现。
 - 引擎分发：**首版不内嵌**（已确认 attach 模式）。若后续做内嵌，再评估自带 Node 运行时
@@ -129,6 +132,9 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 - 品牌：**暂不考虑**（默认沿用 Apache-2.0，签名/公证随后再说）
 
 暂无其他需要拍板的问题；实现细节在 SPEC 中给出。
+
+候选（v2，未拍板）：是否提供"自带引擎 + ACP 轻量模式"作为独立入口（功能子集、零 token 配置），
+评估见 `docs/design/INTEGRATION-MODES.md`。
 
 ## 11. 下一步（只出文档，不写代码）
 

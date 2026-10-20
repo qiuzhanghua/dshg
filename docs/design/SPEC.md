@@ -94,6 +94,18 @@ dshg 的协议层职责：
 4. 重连：指数退避（500ms→10s，抖动）；换代后各域按 baseline 恢复，单向 emit 不重放。
 5. 兼容：端点表按 dsh 包版本快照 + 严格白名单；未知错误码透传字符串，不猜语义。
 
+### 4.1 为什么不是 headless / sdk / acp
+
+dsh 还有 `headless`、`sdk`、`acp` 三个非 Web profile，但都不适合作为 dshg 的主接入面：
+
+- 都是 **stdio** 模式：进程必须由 dshg 自己 spawn，与"attach 用户已运行的 dsh"冲突；
+- `headless` 是一次性任务（无追问/审批/会话列表）；
+- `sdk` 只有 3 个请求 + 4 个通知（无会话列表/审批/设置/插件）；
+- `acp` 是最接近的替代（标准协议、权限请求、会话列表/恢复），但只发已提交消息
+  （**无 token 级流式**），且没有 plan/todo/title/terminal/文件操作/设置/插件。
+
+详见 [INTEGRATION-MODES.md](INTEGRATION-MODES.md)。
+
 ## 5. 数据模型（Rust 侧核心类型）
 
 ```rust
