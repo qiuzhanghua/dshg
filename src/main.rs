@@ -131,6 +131,29 @@ fn run_plugin_toggle(input: &str, id: &str, enabled: bool) -> Result<(), AppErro
     })
 }
 
+fn run_watch(input: &str, session_id: &str, path: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (target, cookie) = authenticate(input).await?;
+        let (tx, rx) = async_channel::unbounded();
+        let session_id = session_id.to_string();
+        let path = path.to_string();
+        let watch = tokio::spawn(async move {
+            let _ = dshg::protocol::files::watch(&target.base, &cookie, &session_id, &path, tx).await;
+        });
+        for _ in 0..3 {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+                Ok(Ok(value)) => println!("{}", serde_json::to_string(&value)?),
+                _ => break,
+            }
+        }
+        watch.abort();
+        Ok(())
+    })
+}
+
 fn run_files(input: &str, session_id: &str, path: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -317,6 +340,17 @@ fn main() {
             };
             let enabled = enabled == "true";
             if let Err(error) = run_plugin_toggle(url, id, enabled) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--watch") => {
+            let (Some(url), Some(session_id), Some(path)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: dshg --watch <url> <sessionId> <absolutePath>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_watch(url, session_id, path) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

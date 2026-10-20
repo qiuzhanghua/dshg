@@ -83,6 +83,66 @@ pub async fn read(
     Ok(serde_json::from_value(value)?)
 }
 
+/// Watch one absolute path; frames are raw `{kind:"ready"|"change"}` values.
+pub async fn watch(
+    base: &url::Url,
+    cookie: &crate::secrets::SessionCookie,
+    session_id: &str,
+    absolute_path: &str,
+    frames: async_channel::Sender<serde_json::Value>,
+) -> Result<(), AppError> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    use crate::connection::ws::{map_ws_error, mux_url};
+
+    let ws_url = mux_url(base)?;
+    let mut request = ws_url
+        .as_str()
+        .into_client_request()
+        .map_err(|error| AppError::Transport(format!("bad websocket request: {error}")))?;
+    request.headers_mut().insert(
+        "cookie",
+        cookie
+            .header()
+            .parse()
+            .map_err(|error| AppError::LocalIo(format!("bad cookie header: {error}")))?,
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(map_ws_error)?;
+    let open = serde_json::json!({
+        "type": "open",
+        "streamId": "files",
+        "endpoint": "workspaceFiles/changes",
+        "payload": { "args": {
+            "workspaceFileScopeId": session_id,
+            "path": absolute_path,
+        } },
+    });
+    socket
+        .send(Message::Text(open.to_string().into()))
+        .await
+        .map_err(map_ws_error)?;
+    loop {
+        let message = match socket.next().await {
+            Some(Ok(message)) => message,
+            Some(Err(error)) => return Err(map_ws_error(error)),
+            None => return Ok(()),
+        };
+        if let Message::Text(text) = message {
+            let frame: serde_json::Value = serde_json::from_str(text.as_str())?;
+            if frame.get("type").and_then(serde_json::Value::as_str) == Some("item")
+                && let Some(value) = frame.get("value")
+                && frames.send(value.clone()).await.is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -64,6 +64,7 @@ pub enum AppEvent {
     FilesLoaded(DirectoryListing),
     FileLoaded(FileText),
     FilesFailed(String),
+    FileChanged(String),
     Failed {
         code: String,
         message: String,
@@ -116,6 +117,8 @@ pub struct AppState {
     files_error: Option<String>,
     files_loading: bool,
     following_cwd: Option<String>,
+    preview_absolute: Option<String>,
+    watch_task: Option<tokio::task::JoinHandle<()>>,
     plugins_open: bool,
     plugins: Option<Inventory>,
     plugins_loading: bool,
@@ -196,6 +199,8 @@ impl AppState {
             files_error: None,
             files_loading: false,
             following_cwd: None,
+            preview_absolute: None,
+            watch_task: None,
             plugins_open: false,
             plugins: None,
             plugins_loading: false,
@@ -404,6 +409,11 @@ impl AppState {
             AppEvent::FilesFailed(message) => {
                 self.files_loading = false;
                 self.files_error = Some(message);
+            }
+            AppEvent::FileChanged(path) => {
+                if self.preview_absolute.as_deref() == Some(path.as_str()) {
+                    self.read_file(path, cx);
+                }
             }
             AppEvent::CredentialDone(status) => {
                 self.cred_busy = false;
@@ -1075,6 +1085,12 @@ impl AppState {
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
         self.files_open = !self.files_open;
+        if !self.files_open {
+            if let Some(task) = self.watch_task.take() {
+                task.abort();
+            }
+            self.preview_absolute = None;
+        }
         if self.files_open && self.following.is_some() && self.files_listing.is_none() {
             self.load_files(cx);
         }
@@ -1136,6 +1152,17 @@ impl AppState {
         }
         relative.push_str(&entry.name);
         let absolute = format!("{}/{}", cwd.trim_end_matches('/'), relative);
+        self.preview_absolute = Some(absolute.clone());
+        self.start_watch(absolute.clone(), cx);
+        self.read_file(absolute, cx);
+    }
+
+    fn read_file(&mut self, absolute: String, cx: &mut Context<Self>) {
+        let (Some(session_id), Some(base), Some(cookie)) =
+            (self.following.clone(), self.base.clone(), self.cookie.clone())
+        else {
+            return;
+        };
         self.files_loading = true;
         self.files_error = None;
         cx.notify();
@@ -1152,6 +1179,46 @@ impl AppState {
             };
             tx.send(event).await.ok();
         });
+    }
+
+    fn start_watch(&mut self, absolute: String, cx: &mut Context<Self>) {
+        if let Some(task) = self.watch_task.take() {
+            task.abort();
+        }
+        let (Some(session_id), Some(base), Some(cookie)) =
+            (self.following.clone(), self.base.clone(), self.cookie.clone())
+        else {
+            return;
+        };
+        let (frame_tx, frame_rx) = async_channel::unbounded::<Value>();
+        self.watch_task = Some(backend::runtime().spawn(async move {
+            loop {
+                let tx = frame_tx.clone();
+                let base = base.clone();
+                let cookie = cookie.clone();
+                let session_id = session_id.clone();
+                let absolute = absolute.clone();
+                let _ = files::watch(&base, &cookie, &session_id, &absolute, tx).await;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }));
+        cx.spawn(async move |this, cx| {
+            while let Ok(value) = frame_rx.recv().await {
+                if value.get("kind").and_then(Value::as_str) == Some("change")
+                    && let Some(path) = value
+                        .get("change")
+                        .and_then(|change| change.get("absolutePath"))
+                        .and_then(Value::as_str)
+                {
+                    let path = path.to_string();
+                    let _ = this.update(cx, |state, cx| {
+                        state.apply(AppEvent::FileChanged(path), cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     fn load_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1244,6 +1311,14 @@ impl AppState {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.open_entry(&entry, cx);
                         })),
+                );
+            }
+            if listing.truncated {
+                entries = entries.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(muted)
+                        .child("（已截断）"),
                 );
             }
             if self.files_loading {
@@ -1688,7 +1763,11 @@ impl AppState {
         self.files_dir.clear();
         self.files_listing = None;
         self.file_preview = None;
+        self.preview_absolute = None;
         self.files_error = None;
+        if let Some(task) = self.watch_task.take() {
+            task.abort();
+        }
         cx.notify();
         if std::env::var("DSHG_OPEN_FILES").is_ok() {
             self.files_open = true;
@@ -2242,24 +2321,46 @@ fn demo_transcript() -> Vec<TranscriptItem> {
 }
 
 fn render_diff(diff: &FileDiff, muted: Hsla, success: Hsla, danger: Hsla) -> AnyElement {
+    let old_lines = diff
+        .old_text
+        .as_deref()
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    let new_lines = diff.new_text.lines().count();
     let mut block = div()
         .flex()
         .flex_col()
         .gap(px(1.))
         .p(px(6.))
-        .rounded(px(4.))
+        .rounded_md()
         .border(px(1.))
         .border_color(muted.opacity(0.2))
         .child(
             div()
-                .text_size(px(10.))
-                .text_color(muted)
-                .child(diff.path.clone()),
+                .flex()
+                .flex_row()
+                .justify_between()
+                .pb(px(2.))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(muted)
+                        .child(diff.path.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(muted)
+                        .child(format!("+{new_lines} -{old_lines}")),
+                ),
         );
     if let Some(old) = &diff.old_text {
         for line in old.lines().take(40) {
             block = block.child(
                 div()
+                    .px(px(4.))
+                    .rounded(px(2.))
+                    .bg(danger.opacity(0.08))
                     .text_size(px(10.))
                     .text_color(danger)
                     .child(format!("- {line}")),
@@ -2269,6 +2370,9 @@ fn render_diff(diff: &FileDiff, muted: Hsla, success: Hsla, danger: Hsla) -> Any
     for line in diff.new_text.lines().take(40) {
         block = block.child(
             div()
+                .px(px(4.))
+                .rounded(px(2.))
+                .bg(success.opacity(0.08))
                 .text_size(px(10.))
                 .text_color(success)
                 .child(format!("+ {line}")),
