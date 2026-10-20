@@ -38,6 +38,22 @@ pub async fn session_list(client: &UnaryClient) -> Result<Vec<SessionSummary>, A
     Ok(page.items)
 }
 
+/// Answer one `approval/request` waterfall with `allowed-once` or `rejected`.
+pub async fn respond_approval(
+    client: &UnaryClient,
+    client_id: &str,
+    event_id: &str,
+    outcome: &str,
+) -> Result<(), AppError> {
+    let args = serde_json::json!({
+        "clientId": client_id,
+        "eventId": event_id,
+        "outcome": { "kind": "result", "value": outcome },
+    });
+    client.call("$events/result", args).await?;
+    Ok(())
+}
+
 /// Queue one text prompt on a session (M2).
 pub async fn send_prompt(
     client: &UnaryClient,

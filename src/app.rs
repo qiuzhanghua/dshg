@@ -14,6 +14,7 @@ use url::Url;
 
 use crate::backend;
 use dshg::config::Config;
+use dshg::connection::events::{self, EventsMessage};
 use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
@@ -29,6 +30,12 @@ pub enum AppEvent {
         cookie: SessionCookie,
     },
     Frame(Value),
+    Events(EventsMessage),
+    ApprovalDone {
+        event_id: String,
+        ok: bool,
+        message: Option<String>,
+    },
     PromptDone {
         ok: bool,
         message: Option<String>,
@@ -51,6 +58,13 @@ struct ErrorView {
     message: String,
 }
 
+#[derive(Clone)]
+struct ApprovalView {
+    event_id: String,
+    tool_name: String,
+    reason: Option<String>,
+}
+
 pub struct AppState {
     #[allow(dead_code)]
     config: Config,
@@ -66,6 +80,9 @@ pub struct AppState {
     base: Option<Url>,
     cookie: Option<SessionCookie>,
     follow_task: Option<tokio::task::JoinHandle<()>>,
+    events_task: Option<tokio::task::JoinHandle<()>>,
+    client_id: Option<String>,
+    approvals: Vec<ApprovalView>,
     error: Option<ErrorView>,
     authority: Option<String>,
     events_tx: Sender<AppEvent>,
@@ -107,6 +124,9 @@ impl AppState {
             base: None,
             cookie: None,
             follow_task: None,
+            events_task: None,
+            client_id: None,
+            approvals: Vec::new(),
             error: None,
             authority: None,
             events_tx,
@@ -124,9 +144,28 @@ impl AppState {
                 self.phase = Phase::Ready;
                 self.authority = Some(authority);
                 self.sessions = sessions;
-                self.base = Some(base);
-                self.cookie = Some(cookie);
+                self.base = Some(base.clone());
+                self.cookie = Some(cookie.clone());
                 self.error = None;
+                if let Some(task) = self.events_task.take() {
+                    task.abort();
+                }
+                self.approvals.clear();
+                self.client_id = None;
+                let (event_tx, event_rx) = async_channel::unbounded::<EventsMessage>();
+                let (event_base, event_cookie) = (base.clone(), cookie.clone());
+                self.events_task = Some(backend::runtime().spawn(async move {
+                    let _ = events::events_loop(&event_base, &event_cookie, event_tx).await;
+                }));
+                cx.spawn(async move |this, cx| {
+                    while let Ok(message) = event_rx.recv().await {
+                        let _ = this.update(cx, |state, cx| {
+                            state.apply(AppEvent::Events(message), cx);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
                 if let Ok(session_id) = std::env::var("DSHG_OPEN_SESSION")
                     && self.sessions.iter().any(|s| s.session_id == session_id)
                 {
@@ -135,6 +174,36 @@ impl AppState {
             }
             AppEvent::Frame(value) => {
                 self.push_frame(value);
+            }
+            AppEvent::Events(message) => match message {
+                EventsMessage::Ready { client_id } => {
+                    self.client_id = Some(client_id);
+                }
+                EventsMessage::Approval {
+                    event_id,
+                    tool_name,
+                    reason,
+                } => {
+                    if !self.approvals.iter().any(|item| item.event_id == event_id) {
+                        self.approvals.push(ApprovalView {
+                            event_id,
+                            tool_name,
+                            reason,
+                        });
+                    }
+                }
+                EventsMessage::Emit { .. } => {}
+            },
+            AppEvent::ApprovalDone {
+                event_id,
+                ok,
+                message,
+            } => {
+                if ok {
+                    self.approvals.retain(|item| item.event_id != event_id);
+                } else {
+                    self.notice = message;
+                }
             }
             AppEvent::PromptDone { ok, message } => {
                 self.sending = false;
@@ -234,6 +303,106 @@ impl AppState {
             };
             tx.send(event).await.ok();
         });
+    }
+
+    fn respond(
+        &mut self,
+        event_id: String,
+        outcome: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(base), Some(cookie), Some(client_id)) = (
+            self.base.clone(),
+            self.cookie.clone(),
+            self.client_id.clone(),
+        ) else {
+            self.notice = Some("尚未收到 events ready，无法回应审批".to_string());
+            cx.notify();
+            return;
+        };
+        self.notice = None;
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                methods::respond_approval(&client, &client_id, &event_id, outcome).await
+            }
+            .await;
+            let event = match result {
+                Ok(()) => AppEvent::ApprovalDone {
+                    event_id,
+                    ok: true,
+                    message: None,
+                },
+                Err(error) => AppEvent::ApprovalDone {
+                    event_id,
+                    ok: false,
+                    message: Some(error.to_string()),
+                },
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
+    fn render_approvals(
+        &self,
+        cx: &mut Context<Self>,
+        border: Hsla,
+        accent: Hsla,
+        muted: Hsla,
+    ) -> AnyElement {
+        if self.approvals.is_empty() {
+            return div().into_any_element();
+        }
+        let mut column = div().flex().flex_col().gap(px(6.)).px(px(16.)).py(px(8.));
+        for approval in &self.approvals {
+            let event_id = approval.event_id.clone();
+            let allow_id = event_id.clone();
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .p(px(10.))
+                    .rounded_md()
+                    .border(px(1.))
+                    .border_color(accent)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(accent)
+                            .child(format!("审批请求 · {}", approval.tool_name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(approval.reason.clone().unwrap_or_default()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(
+                                Button::new(format!("allow-{allow_id}"))
+                                    .primary()
+                                    .label("允许一次")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond(allow_id.clone(), "allowed-once", cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("reject-{event_id}"))
+                                    .label("拒绝")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond(event_id.clone(), "rejected", cx);
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        column.into_any_element()
     }
 
     fn send(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -455,6 +624,7 @@ impl AppState {
                             .flex_col()
                             .min_h(px(0.))
                             .child(self.render_transcript(cx, muted, accent))
+                        .child(self.render_approvals(cx, border, accent, muted))
                         .child(self.render_composer(cx, muted, border, danger)),
                     ),
             )
