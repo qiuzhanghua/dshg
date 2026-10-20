@@ -49,7 +49,7 @@ Windows/Linux 首版支持；Web/TUI/移动端。
 
 | 关注点 | 选择 | 说明 |
 | --- | --- | --- |
-| UI 框架 | `gpui` + `gpui-kit` 0.7.x | 原生高刷、Dock、虚拟化列表、Markdown、代码编辑器、主题、AccessKit |
+| UI 框架 | `gpui` + `gpui-kit`（0.7.x/0.8.x，开工时锁定） | 原生高刷、Dock、虚拟化列表、Markdown、代码编辑器、主题、AccessKit；选型对比见 [FRAMEWORK-COMPARISON.md](FRAMEWORK-COMPARISON.md) |
 | 异步/网络 | tokio（专用线程）+ reqwest + tokio-tungstenite | 与 GPUI executor 解耦；rustls，不依赖 OpenSSL |
 | 序列化 | serde / serde_json | 容忍未知字段；协议类型与 TS 定义对齐 |
 | 错误 | thiserror + 统一 `AppError` | 分类：连接/协议/引擎返回/本地 IO |
