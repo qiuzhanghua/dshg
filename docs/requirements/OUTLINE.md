@@ -1,18 +1,18 @@
 # dshg 需求纲要（一页纸）
 
-- 版本：v0.5 草案
+- 版本：v0.6 草案
 - 日期：2026-10-20
-- 状态：方向已确认（首版仅 macOS、attach 外部 dsh 引擎、与官方 Web UI 长期并存、
-  GUI 内可启停插件、不做远程连接、MVP 不含终端与文件编辑）；
-  本阶段**只出文档，不写代码**；文中 `[假设]` 为未验证前提，`[待定]` 为仍需拍板的决策
+- 状态：**范围升级**——总体需求改为"完全复刻 dsh-tauri 桌面端的功能"（见
+  [design/PARITY-TARGET.md](../design/PARITY-TARGET.md)），此前"MVP 子集"的范围与相关决策作废，
+  需按 §10 重新确认；本阶段**只出文档，不写代码**
 
 ## 1. 定位
 
-**dshg 是 DeepSeek Harness（dsh）的原生桌面 GUI 客户端**：Rust + GPUI + GPUI Kit，
-跨平台；只负责"界面 + 本地引擎连接"，agent 的模型调用、工具、沙箱、会话仍由 dsh 引擎提供。
-**与官方 Web UI 长期并存，不替代它。**
+**dshg 是 dsh-tauri 的原生复刻**：Rust + GPUI + GPUI Kit，目标功能全量对齐
+`dsh-tauri/deepseek-harness-desktop`（桌面端），分阶段实现；不重写 dsh 内核，
+也不复用 Tauri/React 代码与 UI 资产。
 
-一句话：**用原生桌面 UI 体验 dsh，而不是重写 dsh。**
+一句话：**用原生桌面技术重新实现 dsh-tauri 的完整体验，而不是先做一个子集。**
 
 ## 2. 为什么做
 
@@ -48,13 +48,15 @@
 ## 4. 形态与平台
 
 - 形态：原生桌面应用（单窗口 + Dock 面板布局），无浏览器依赖。
-- 平台：**首版仅 macOS**（已确认）。Windows / Linux 作为后续里程碑：GPUI Kit 声称三平台 + WASM，
-  Linux 的 IME/Wayland 与 Windows 的 IME 需在对应里程碑实测。
-- 不做：Web 版、TUI、移动端、远程/局域网连接（首版及可见版本）、多引擎实例管理。
+- 平台：**macOS 先行，Windows / Linux 作为 P4 目标**（待确认，见 PARITY-TARGET §6）。
+- 不做：Web 版、TUI；移动端 App 是否复刻待定；不再排除远程/局域网（旧决策作废）。
 
 ## 5. 架构主张
 
-**GUI = dsh 的前端客户端；引擎 = 用户自行运行的 dsh 进程（首版只 attach，不内嵌）。**
+**GUI = dsh 的前端客户端；引擎 = 管理式运行时（默认）或用户已有的 dsh（可选 attach）。**
+
+> 旧决策"只 attach、不内嵌"已被"完全复刻"覆盖：dsh-tauri 会下载并管理 Node/dsh、切换核心。
+> 建议改为"默认管理式 + 可选 attach"（待确认），M0 的 attach 作为过渡与调试入口保留。
 
 - 引擎连接：用户自行运行 `dsh --profile web`，dshg 通过 dsh **Client API（HTTP + WebSocket，
   Typert Remote gateway）** 连接，协议与官方 Web 前端一致。
@@ -89,7 +91,9 @@
 | 设置 | 模型/Provider/API Key、shell、沙箱、主题、语言、**插件启用/禁用** | 插件配置详情、技能管理、agent loop 细项 | — |
 | 其他 | 通知、快捷键、单实例、崩溃恢复 | jobs、plan mode、goal、schedule、workflow | 移动端、Web 版 |
 
-MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保存**（文件只读预览 + diff 查看）。
+说明：本表只是 **P0 阶段**范围；全量功能（终端、插件市场、运行时管理、Profile、远程、宠物、
+个性化、更新等）见 [design/PARITY-TARGET.md](../design/PARITY-TARGET.md)。旧"MVP 不含终端
+与文件编辑"的边界仅适用于 P0；文件仍保持只读（dsh 无写 API），终端在 P2 纳入。
 
 ## 7. 非功能需求
 
@@ -121,27 +125,30 @@ MVP 边界（已确认）：**不含内置终端面板，不含文件编辑/保�
 
 ## 10. 决策与待确认问题
 
-已确认（2026-10-20）：
+**已被"完全复刻"覆盖、需重新确认**（2026-10-20 旧结论）：
 
-- 定位：**与官方 Web UI 长期并存，不替代；不改 dsh 源码、不 fork**
-- 首版平台：**仅 macOS**
-- 引擎：**只 attach 外部 dsh 实例**，不内嵌
-- 插件：GUI 内可**启用/禁用**；技能先只展示
-- 远程连接：**不做**
-- MVP：**不含终端面板、不含文件编辑/保存**
-- 品牌：**暂不考虑**（默认沿用 Apache-2.0，签名/公证随后再说）
+| 旧结论 | 现状 | 建议 |
+| --- | --- | --- |
+| 只 attach、不内嵌 | 与 dsh-tauri 的管理式运行时冲突 | 默认管理式 + 可选 attach |
+| 不做远程/局域网 | dsh-tauri 有 LAN/QR/隧道 | 桌面端远程纳入 P3，移动 App 待定 |
+| 不做终端、不做文件编辑 | 终端在 dsh-tauri 中存在 | 终端 P2；文件保持只读 |
+| 插件仅启停 | dsh-tauri 有完整插件管理 | P2 完整管理 |
+| 首版仅 macOS | dsh-tauri 三平台 | macOS 先行，P4 三平台 |
+| MVP 不做宠物/个性化 | dsh-tauri 有宠物与 8 调色板 | P3，可后置 |
 
-暂无其他需要拍板的问题；实现细节在 SPEC 中给出。
+仍然有效：
 
-候选（v2，未拍板）：是否提供"自带引擎 + ACP 轻量模式"作为独立入口（功能子集、零 token 配置），
-评估见 `docs/design/INTEGRATION-MODES.md`。
+- 不改 dsh 源码、不 fork；不重写 agent 内核；
+- 与官方 Web UI 长期并存、不替代（复刻对象是 dsh-tauri，不是 Web UI）；
+- 不做像素级 UI 复刻（功能与流程对齐即可，待确认）。
+
+待拍板问题见 PARITY-TARGET §6（引擎模型、平台、移动端、远程、宠物、验收口径）。
 
 ## 11. 下一步（只出文档，不写代码）
 
-1. `docs/design/SPEC.md` —— v0.2 已完成，待评审。
-2. `docs/design/PROTOCOL.md` —— v0.1 已完成（250 行，方法/事件/审批/插件，带源码依据），待实测验证。
-3. `docs/design/PARITY.md` —— v0.1 已完成，待按当前 dsh 版本复核。
-4. 评审 SPEC / PROTOCOL / PARITY → 排 M0 任务；M0 前先做协议实测
-   （`docs/design/VALIDATION.md`：token→cookie、WS upgrade、session/follow、审批往返、插件启停），
-   仍不写产品代码。
-5. 评审通过并完成实测后，再开始编码；M0 任务拆分见 `docs/design/M0-DESIGN.md`。
+1. 确认 [PARITY-TARGET.md](../design/PARITY-TARGET.md) §6 的 6 个问题（引擎模型、平台、移动端、
+   远程、宠物、验收口径）。
+2. 按新范围重写 SPEC 的范围与里程碑（旧 SPEC 的架构仍适用，M0 仍是正确的第一步）。
+3. 协议实测（`VALIDATION.md`）不变，仍是 M0 的前置。
+4. 并行补齐 dsh-tauri 的功能细节（内置插件、Profile、运行时管理、宠物、更新器），
+   逐项写详细设计；仍不写产品代码。

@@ -3,7 +3,8 @@
 - 版本：v0.2 草案
 - 日期：2026-10-20
 - 上游需求：[需求纲要](../requirements/OUTLINE.md)（v0.4）
-- 状态：与需求纲要同步，待评审；协议细节见 [PROTOCOL.md](PROTOCOL.md)（v0.1）
+- 状态：**范围已升级**——总体需求改为完全复刻 dsh-tauri，本文的"v1 范围/里程碑"以
+  [PARITY-TARGET.md](PARITY-TARGET.md) 为准；架构与协议部分仍然有效。
 
 ## 1. 范围
 
