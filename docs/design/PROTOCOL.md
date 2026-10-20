@@ -17,7 +17,7 @@
 | Origin / Sec-Fetch / 失败码 | Origin 存在时必须等于 Host；`sec-fetch-site: cross-site` 拒绝；栅栏失败 403，通过栅栏但无凭据 401 | 同上 `:212-216,587` |
 | `--trusted-host` | 可重复追加栅栏白名单；`--host 0.0.0.0` 需 `DSH_PKG_ALLOW_LAN=1` | `dsh-web-app/lib/startup.js:22,40-41,47` |
 
-认证为**进程级 launch token → 签名 cookie** 两段式（`dsh-client-connection/lib/index.js:244-250,374-410`）：① 进程启动生成随机 base64url token（仅内存），打印 `dsh web: http://127.0.0.1:<port>/?token=<token>`（`dsh-web-app/lib/index.js:203`）；② `GET /?token=<t>`（必须恰好一个 token、pathname 为 `/`）→ `303 Location: ./` + `Set-Cookie`；③ cookie 名 = `PREFIX + base64url(sha256(authority))`，值为 HMAC 签名的 `{version,authority,issuedAt,expiresAt}`，属性 `Path=/; HttpOnly; SameSite=Strict`、**无 `Secure`**、默认 30 天；④ 此后所有 `/api/*` 与 WS upgrade 只认 cookie——**不存在** query token（根路径外）、`Authorization` 头或 loopback 免认证档位；⑤ 非 index 静态资源公开。
+认证为**进程级 launch token → 签名 cookie** 两段式（`dsh-client-connection/lib/index.js:244-250,374-410`（V1–V5 已实测，见 VALIDATION-RESULTS.md））：① 进程启动生成随机 base64url token（仅内存），打印 `dsh web: http://127.0.0.1:<port>/?token=<token>`（`dsh-web-app/lib/index.js:203`）；② `GET /?token=<t>`（必须恰好一个 token、pathname 为 `/`）→ `303 Location: ./` + `Set-Cookie`；③ cookie 名 = `dsh-auth-<base64url(sha256(authority))>`（实测），值为 HMAC 签名的 `{version,authority,issuedAt,expiresAt}`，属性 `Path=/; HttpOnly; SameSite=Strict`、**无 `Secure`**、默认 30 天；④ 此后所有 `/api/*` 与 WS upgrade 只认 cookie——**不存在** query token（根路径外）、`Authorization` 头或 loopback 免认证档位；⑤ 非 index 静态资源公开。
 
 ### 1.2 generation / reconnect
 

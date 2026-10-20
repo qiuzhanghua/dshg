@@ -30,6 +30,10 @@ export WORK="/tmp/dshg-validate"       # 测试 workspace
 mkdir -p "$WORK"
 ```
 
+> 注意：`~/.local/bin/dsh` 是 dsh-tauri 生成的 shim，**硬编码 `DSH_HOME=~/.dsh`**。
+> 想隔离数据或指定 home，必须绕过 shim 直接调
+> `node .../@deepseek-ai/dsh/lib/bin.js` 并显式设置 `DSH_HOME`（见 VALIDATION-RESULTS.md）。
+
 工具：
 
 | 用途 | 工具 | 备注 |
@@ -75,7 +79,8 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 ```sh
 curl -s -i -c "$JAR" "$BASE/?token=$TOKEN" | sed -n '1,20p'
-awk '$6 ~ /^dsh-session-/{print $6"="$7}' "$JAR"
+# curl 的 jar 把 HttpOnly 行写成 #HttpOnly_<host>；cookie 名实测为 dsh-auth-<hash>
+awk -F'\t' '$6 ~ /^dsh-auth-/{print $6"="$7}' "$JAR"
 ```
 
 判据：
@@ -94,7 +99,7 @@ post() { curl -s -b "$JAR" -H 'Content-Type: application/json' \
   "$BASE/api/$2"; }
 
 post s1 settings/describe '{}'            | jq .
-post s2 session/list '{}'                 | jq '.result.ok, .result.value.items[0]'
+post s2 session/list '{"_request":{}}'   | jq '.result.ok, .result.value.items[0]'
 post s3 pluginInventory/list '{}'         | jq '.result.ok'
 ```
 
@@ -125,7 +130,7 @@ b 返回 401。**若 b 返回 101，说明 WS 不校验 cookie，认证方案需
 ### V5 `$events` ready 帧与转发事件（BLOCK 级）
 
 ```sh
-COOKIE=$(awk '$6 ~ /^dsh-session-/{print $6"="$7}' "$JAR")
+COOKIE=$(awk -F'\t' '$6 ~ /^dsh-auth-/{print $6"="$7}' "$JAR")
 wscat -c "ws://127.0.0.1:<port>/api/remote.mux" -H "Cookie: $COOKIE" 2>&1 | tee /tmp/dshg-ws.log
 ```
 

@@ -130,6 +130,8 @@ UI 只读快照：`{state, attempt, last_error, engine_authority}`。
 
 ## 6. 数据流（M0）
 
+0. 拉取会话列表：`session/list` 的形参名是 `_request`（实测），
+   `payload = {args: {_request: {}}}`；`settings/describe`、`pluginInventory/list` 用空 args。
 1. Supervisor → `TransportEvent::SessionsLoaded(Vec<SessionSummary>)`。
 2. Store 更新列表（按 `updatedAt` 倒序），保留选中项（不存在则选第一个）。
 3. Root 触发一次 `cx.notify()`；`session_list` 用虚拟化列表渲染。
