@@ -9,7 +9,8 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 | [design/SPEC.md](design/SPEC.md) | 设计规格：架构、选型、数据模型、界面、流程、里程碑、验收 | v0.2 草案，待评审 |
 | [design/PROTOCOL.md](design/PROTOCOL.md) | dsh 客户端协议梳理（HTTP + WS、事件、审批、插件），250 行、带源码依据 | v0.1 完成，待实测验证 |
 | [design/PARITY.md](design/PARITY.md) | 与官方 Web UI 的功能对照与差异 | v0.1 草案 |
-| [design/VALIDATION.md](design/VALIDATION.md) | 协议实测计划：V1–V11 用例、命令、判据、记录模板 | v0.1，待执行 |
+| [design/VALIDATION.md](design/VALIDATION.md) | 协议实测计划：V1–V11 用例、命令、判据、记录模板 | v0.1，V1–V5 已执行 |
+| [design/VALIDATION-RESULTS.md](design/VALIDATION-RESULTS.md) | 实测结果：认证/WS/ready 帧（V1–V5 PASS） | 2026-10-20 |
 | [design/M0-DESIGN.md](design/M0-DESIGN.md) | M0 详细设计：工程结构、状态机、数据流、UI、任务拆分、验收 | v0.1，待评审 |
 | [design/PARITY-TARGET.md](design/PARITY-TARGET.md) | **复刻目标**：dsh-tauri 功能全集、冲突决策、P0–P4 路线 | v0.1，待确认 |
 | [design/FRAMEWORK-COMPARISON.md](design/FRAMEWORK-COMPARISON.md) | GPUI Kit vs egui 选型对比与切换触发条件 | v0.1 |
