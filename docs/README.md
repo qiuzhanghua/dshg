@@ -45,7 +45,8 @@ M3（审批）：`$events` 长连接、`approval/request` 解析、审批卡片�
 `$events/result` 回执已实现；**端到端未验证**（隔离 home 无模型凭据，无法触发工具调用）。
 
 工具卡片：按 callId 配对调用/结果；bash/read/grep/glob/web 参数摘要；运行中/成功/错误状态；
-`tool/result.meta` 原样附注。diff 的专用渲染仍未做。
+长结果展开/收起与复制；`tool/result.meta` 里的 fs diff 渲染为红绿行。
+演示：`DSHG_DEMO_TRANSCRIPT=1 cargo run` 可看一张带 diff 的示例卡片。
 
 工程：core 拆成 `src/lib.rs`（config/connection/protocol/secrets/transcript），
 `cargo test --lib` 23 个测试全绿，解析层不再依赖 GPUI。

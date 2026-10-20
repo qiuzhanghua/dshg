@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use async_channel::{Receiver, Sender};
@@ -19,7 +20,10 @@ use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
 use dshg::secrets::SessionCookie;
-use dshg::transcript::{apply_events, parse_frame, tool_summary, TranscriptEvent, TranscriptItem};
+use dshg::transcript::{
+    apply_events, diffs_from_meta, parse_frame, tool_summary, FileDiff, TranscriptEvent,
+    TranscriptItem,
+};
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -72,6 +76,7 @@ pub struct AppState {
     url_input: Entity<InputState>,
     sessions: Vec<SessionSummary>,
     transcript: Vec<TranscriptItem>,
+    expanded: HashSet<String>,
     live_assistant: String,
     prompt_input: Entity<InputState>,
     sending: bool,
@@ -110,12 +115,13 @@ impl AppState {
         })
         .detach();
 
-        Self {
+        let mut state = Self {
             config,
             phase: Phase::NeedsAuth,
             url_input,
             sessions: Vec::new(),
             transcript: Vec::new(),
+            expanded: HashSet::new(),
             live_assistant: String::new(),
             prompt_input,
             sending: false,
@@ -130,7 +136,15 @@ impl AppState {
             error: None,
             authority: None,
             events_tx,
+        };
+
+        if std::env::var("DSHG_DEMO_TRANSCRIPT").is_ok() {
+            state.phase = Phase::Ready;
+            state.following = Some("demo".to_string());
+            state.authority = Some("demo".to_string());
+            state.transcript = demo_transcript();
         }
+        state
     }
 
     fn apply(&mut self, event: AppEvent, cx: &mut Context<Self>) {
@@ -536,6 +550,7 @@ impl AppState {
         muted: Hsla,
         border: Hsla,
         accent: Hsla,
+        success: Hsla,
         danger: Hsla,
     ) -> AnyElement {
         let authority = self.authority.clone().unwrap_or_default();
@@ -623,7 +638,7 @@ impl AppState {
                             .flex()
                             .flex_col()
                             .min_h(px(0.))
-                            .child(self.render_transcript(cx, muted, accent))
+                            .child(self.render_transcript(cx, muted, accent, success, danger))
                         .child(self.render_approvals(cx, border, accent, muted))
                         .child(self.render_composer(cx, muted, border, danger)),
                     ),
@@ -747,7 +762,152 @@ impl AppState {
             .into_any_element()
     }
 
-    fn render_transcript(&self, _cx: &mut Context<Self>, muted: Hsla, accent: Hsla) -> AnyElement {
+    fn toggle_expanded(&mut self, call_id: String, cx: &mut Context<Self>) {
+        if !self.expanded.remove(&call_id) {
+            self.expanded.insert(call_id);
+        }
+        cx.notify();
+    }
+
+    fn render_item(
+        &self,
+        index: usize,
+        item: &TranscriptItem,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        accent: Hsla,
+        success: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
+        match item {
+            TranscriptItem::User(text) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(11.)).text_color(muted).child("你"))
+                .child(
+                    TextView::markdown(
+                        ElementId::Name(format!("user-{index}").into()),
+                        text.clone(),
+                    )
+                    .w_full(),
+                )
+                .into_any_element(),
+            TranscriptItem::Assistant(text) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(11.)).text_color(accent).child("dsh"))
+                .child(
+                    TextView::markdown(
+                        ElementId::Name(format!("assistant-{index}").into()),
+                        text.clone(),
+                    )
+                    .w_full(),
+                )
+                .into_any_element(),
+            TranscriptItem::Tool(call) => {
+                let summary = tool_summary(&call.name, &call.arguments);
+                let status = match &call.result {
+                    Some(result) if result.error => "error",
+                    Some(_) => "done",
+                    None => "running",
+                };
+                let expanded = self.expanded.contains(&call.call_id);
+                let text = call
+                    .result
+                    .as_ref()
+                    .map(|result| result.text.clone())
+                    .unwrap_or_default();
+                let long = text.chars().count() > 600;
+                let shown = if expanded {
+                    truncate(&text, 6000)
+                } else {
+                    truncate(&text, 600)
+                };
+                let diffs = call
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.meta.as_deref())
+                    .map(diffs_from_meta)
+                    .unwrap_or_default();
+
+                let toggle_id = call.call_id.clone();
+                let copy_text = text.clone();
+
+                let mut card = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .p(px(8.))
+                    .rounded_md()
+                    .border(px(1.))
+                    .border_color(muted.opacity(0.25))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(format!("tool · {}", call.name)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(if status == "error" { danger } else { muted })
+                                    .child(status),
+                            ),
+                    );
+                if !summary.is_empty() {
+                    card = card.child(
+                        div()
+                            .text_size(px(11.))
+                            .child(truncate(&summary, 300)),
+                    );
+                }
+                if !text.is_empty() {
+                    card = card.child(div().text_size(px(11.)).child(shown));
+                }
+                if !text.is_empty() {
+                    let mut actions = div().flex().flex_row().gap(px(6.)).child(
+                        Button::new(format!("copy-{}", call.call_id))
+                            .compact()
+                            .label("复制")
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            })),
+                    );
+                    if long {
+                        actions = actions.child(
+                            Button::new(format!("toggle-{}", call.call_id))
+                                .compact()
+                                .label(if expanded { "收起" } else { "展开" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_expanded(toggle_id.clone(), cx);
+                                })),
+                        );
+                    }
+                    card = card.child(actions);
+                }
+                for diff in &diffs {
+                    card = card.child(render_diff(diff, muted, success, danger));
+                }
+                card.into_any_element()
+            }
+        }
+    }
+
+    fn render_transcript(
+        &self,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        accent: Hsla,
+        success: Hsla,
+        danger: Hsla,
+    ) -> AnyElement {
         if self.following.is_none() {
             return div()
                 .flex_1()
@@ -773,11 +933,11 @@ impl AppState {
             );
         }
         for (index, item) in self.transcript.iter().enumerate() {
-            column = column.child(render_item(index, item, muted, accent));
+            column = column.child(self.render_item(index, item, cx, muted, accent, success, danger));
         }
         if !self.live_assistant.is_empty() {
             let live = TranscriptItem::Assistant(self.live_assistant.clone());
-            column = column.child(render_item(self.transcript.len(), &live, muted, accent));
+            column = column.child(self.render_item(self.transcript.len(), &live, cx, muted, accent, success, danger));
         }
 
         div()
@@ -793,89 +953,65 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-fn render_item(index: usize, item: &TranscriptItem, muted: Hsla, accent: Hsla) -> AnyElement {
-    match item {
-        TranscriptItem::User(text) => div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(div().text_size(px(11.)).text_color(muted).child("你"))
-            .child(
-                TextView::markdown(ElementId::Name(format!("user-{index}").into()), text.clone())
-                    .w_full(),
-            )
-            .into_any_element(),
-        TranscriptItem::Assistant(text) => div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(div().text_size(px(11.)).text_color(accent).child("dsh"))
-            .child(
-                TextView::markdown(
-                    ElementId::Name(format!("assistant-{index}").into()),
-                    text.clone(),
-                )
-                .w_full(),
-            )
-            .into_any_element(),
-        TranscriptItem::Tool(call) => {
-            let summary = tool_summary(&call.name, &call.arguments);
-            let status = match &call.result {
-                Some(result) if result.error => "error",
-                Some(_) => "done",
-                None => "running",
-            };
-            let mut card = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .p(px(8.))
-                .rounded_md()
-                .border(px(1.))
-                .border_color(muted.opacity(0.25))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(format!("tool · {}", call.name)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(if status == "error" { accent } else { muted })
-                                .child(status),
-                        ),
-                );
-            if !summary.is_empty() {
-                card = card.child(
-                    div()
-                        .text_size(px(11.))
-                        .child(truncate(&summary, 300)),
-                );
-            }
-            if let Some(result) = &call.result {
-                card = card.child(
-                    div()
-                        .text_size(px(11.))
-                        .child(truncate(&result.text, 800)),
-                );
-                if let Some(meta) = &result.meta {
-                    card = card.child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(muted)
-                            .child(truncate(meta, 200)),
-                    );
-                }
-            }
-            card.into_any_element()
+fn demo_transcript() -> Vec<TranscriptItem> {
+    let meta = serde_json::json!({
+        "diffs": [{
+            "path": "src/demo.rs",
+            "oldText": "fn main() {\n    old();\n}",
+            "newText": "fn main() {\n    new();\n}",
+        }]
+    })
+    .to_string();
+    vec![
+        TranscriptItem::User("改一下 demo".to_string()),
+        TranscriptItem::Assistant("好的，我先看一下文件。".to_string()),
+        TranscriptItem::Tool(dshg::transcript::ToolCall {
+            call_id: "demo-call".to_string(),
+            name: "edit".to_string(),
+            arguments: r#"{"path":"src/demo.rs"}"#.to_string(),
+            result: Some(dshg::transcript::ToolResult {
+                text: "applied 1 hunk".to_string(),
+                error: false,
+                meta: Some(meta),
+            }),
+        }),
+    ]
+}
+
+fn render_diff(diff: &FileDiff, muted: Hsla, success: Hsla, danger: Hsla) -> AnyElement {
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .gap(px(1.))
+        .p(px(6.))
+        .rounded(px(4.))
+        .border(px(1.))
+        .border_color(muted.opacity(0.2))
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(muted)
+                .child(diff.path.clone()),
+        );
+    if let Some(old) = &diff.old_text {
+        for line in old.lines().take(40) {
+            block = block.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(danger)
+                    .child(format!("- {line}")),
+            );
         }
     }
+    for line in diff.new_text.lines().take(40) {
+        block = block.child(
+            div()
+                .text_size(px(10.))
+                .text_color(success)
+                .child(format!("+ {line}")),
+        );
+    }
+    block.into_any_element()
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -906,9 +1042,10 @@ impl Render for AppState {
         let border = colors.border;
         let accent = colors.accent;
         let danger = colors.danger;
+        let success = colors.success;
 
         let body = if self.phase == Phase::Ready {
-            self.render_shell(cx, muted, border, accent, danger)
+            self.render_shell(cx, muted, border, accent, success, danger)
         } else {
             self.render_onboarding(cx, muted, danger)
         };

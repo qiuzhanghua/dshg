@@ -18,6 +18,13 @@ pub struct ToolCall {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct FileDiff {
+    pub path: String,
+    pub old_text: Option<String>,
+    pub new_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum TranscriptItem {
     User(String),
     Assistant(String),
@@ -171,6 +178,29 @@ pub fn apply_events(items: &mut Vec<TranscriptItem>, events: Vec<TranscriptEvent
     }
 }
 
+/// Narrow `tool/result.meta` to the fs diff payload (`{diffs:[{path,oldText,newText}]}`).
+pub fn diffs_from_meta(meta: &str) -> Vec<FileDiff> {
+    let Ok(value) = serde_json::from_str::<Value>(meta) else {
+        return Vec::new();
+    };
+    let Some(diffs) = value.get("diffs").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    diffs
+        .iter()
+        .filter_map(|diff| {
+            Some(FileDiff {
+                path: diff.get("path")?.as_str()?.to_string(),
+                old_text: diff
+                    .get("oldText")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                new_text: diff.get("newText")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// One-line argument summary for a tool card, keyed by the tool name.
 pub fn tool_summary(name: &str, arguments: &str) -> String {
     let value: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
@@ -290,6 +320,17 @@ mod tests {
             tool_summary("grep", r#"{"pattern":"todo","path":"src"}"#),
             "todo  src"
         );
+    }
+
+    #[test]
+    fn narrows_fs_diffs_from_meta() {
+        let meta = r#"{"diffs":[{"path":"src/a.rs","oldText":"old\n","newText":"new\n"}],"operation":"update"}"#;
+        let diffs = diffs_from_meta(meta);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "src/a.rs");
+        assert_eq!(diffs[0].old_text.as_deref(), Some("old\n"));
+        assert_eq!(diffs[0].new_text, "new\n");
+        assert!(diffs_from_meta("not json").is_empty());
     }
 
     #[test]
