@@ -19,7 +19,7 @@ use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
 use dshg::secrets::SessionCookie;
-use dshg::transcript::{parse_frame, TranscriptItem};
+use dshg::transcript::{apply_events, parse_frame, tool_summary, TranscriptEvent, TranscriptItem};
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -223,18 +223,18 @@ impl AppState {
             self.apply_assistant_stream(&value);
             return;
         }
-        let (is_snapshot, items) = parse_frame(&value);
+        let (is_snapshot, events) = parse_frame(&value);
         if is_snapshot {
             self.transcript.clear();
             self.live_assistant.clear();
         }
-        if items
+        if events
             .iter()
-            .any(|item| matches!(item, TranscriptItem::Assistant(_)))
+            .any(|event| matches!(event, TranscriptEvent::Assistant(_)))
         {
             self.live_assistant.clear();
         }
-        self.transcript.extend(items);
+        apply_events(&mut self.transcript, events);
     }
 
     fn apply_assistant_stream(&mut self, value: &Value) {
@@ -818,38 +818,63 @@ fn render_item(index: usize, item: &TranscriptItem, muted: Hsla, accent: Hsla) -
                 .w_full(),
             )
             .into_any_element(),
-        TranscriptItem::ToolCall { name, arguments } => div()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .p(px(8.))
-            .rounded_md()
-            .border(px(1.))
-            .border_color(muted.opacity(0.25))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(format!("tool · {name}")),
-            )
-            .child(div().text_size(px(11.)).child(truncate(arguments, 300)))
-            .into_any_element(),
-        TranscriptItem::ToolResult { text, error } => div()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .p(px(8.))
-            .rounded_md()
-            .border(px(1.))
-            .border_color(muted.opacity(0.25))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(if *error { accent } else { muted })
-                    .child(if *error { "tool result · error" } else { "tool result" }),
-            )
-            .child(div().text_size(px(11.)).child(truncate(text, 600)))
-            .into_any_element(),
+        TranscriptItem::Tool(call) => {
+            let summary = tool_summary(&call.name, &call.arguments);
+            let status = match &call.result {
+                Some(result) if result.error => "error",
+                Some(_) => "done",
+                None => "running",
+            };
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(8.))
+                .rounded_md()
+                .border(px(1.))
+                .border_color(muted.opacity(0.25))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(format!("tool · {}", call.name)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(if status == "error" { accent } else { muted })
+                                .child(status),
+                        ),
+                );
+            if !summary.is_empty() {
+                card = card.child(
+                    div()
+                        .text_size(px(11.))
+                        .child(truncate(&summary, 300)),
+                );
+            }
+            if let Some(result) = &call.result {
+                card = card.child(
+                    div()
+                        .text_size(px(11.))
+                        .child(truncate(&result.text, 800)),
+                );
+                if let Some(meta) = &result.meta {
+                    card = card.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(muted)
+                            .child(truncate(meta, 200)),
+                    );
+                }
+            }
+            card.into_any_element()
+        }
     }
 }
 
