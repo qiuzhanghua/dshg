@@ -44,8 +44,9 @@ M2（对话）：Composer + `session/prompt` 已接（`--prompt` 验证 accepted
 M3（审批）：`$events` 长连接、`approval/request` 解析、审批卡片（允许一次/拒绝）、
 `$events/result` 回执已实现；**端到端未验证**（隔离 home 无模型凭据，无法触发工具调用）。
 
-P1 设置页（只读）：命名空间列表、值 JSON、`applies/revision`、凭据槽位、打开设置文档、刷新；
-`--settings` CLI 可验证；编辑（`settings/update`）待做。
+P1 设置页：命名空间列表、值 JSON、`applies/revision`、凭据槽位、打开设置文档、刷新；
+**编辑**（JSON 合并保存 + `expectedRevision` 冲突提示）已接；`--settings` / `--settings-set` CLI 可验证。
+凭据写入（`credentials/set`）未接。
 
 工具卡片：按 callId 配对调用/结果；bash/read/grep/glob/web 参数摘要；运行中/成功/错误状态；
 长结果展开/收起与复制；`tool/result.meta` 里的 fs diff 渲染为红绿行。

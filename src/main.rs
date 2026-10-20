@@ -66,6 +66,27 @@ fn run_create(input: &str, cwd: Option<&str>) -> Result<(), AppError> {
     })
 }
 
+fn run_settings_set(input: &str, ns: &str, json: &str) -> Result<(), AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let patch: serde_json::Value = serde_json::from_str(json)?;
+        let (target, cookie) = authenticate(input).await?;
+        let unary = UnaryClient::new(target.base.clone(), Some(cookie))?;
+        let describe = dshg::protocol::settings::describe(&unary).await?;
+        let revision = describe
+            .namespaces
+            .iter()
+            .find(|item| item.ns == ns)
+            .map(|item| item.revision)
+            .ok_or_else(|| AppError::Decode(format!("namespace {ns} not found")))?;
+        let view = dshg::protocol::settings::update(&unary, ns, patch, revision).await?;
+        println!("{}", serde_json::to_string_pretty(&view)?);
+        Ok(())
+    })
+}
+
 fn run_settings(input: &str) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -162,6 +183,17 @@ fn main() {
                 std::process::exit(2);
             };
             if let Err(error) = run_settings(url) {
+                eprintln!("error [{}]: {error}", error.code());
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("--settings-set") => {
+            let (Some(url), Some(ns), Some(json)) = (args.get(2), args.get(3), args.get(4)) else {
+                eprintln!("usage: dshg --settings-set <url> <ns> <json>");
+                std::process::exit(2);
+            };
+            if let Err(error) = run_settings_set(url, ns, json) {
                 eprintln!("error [{}]: {error}", error.code());
                 std::process::exit(1);
             }

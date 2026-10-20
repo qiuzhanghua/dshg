@@ -5,7 +5,7 @@ use async_channel::{Receiver, Sender};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::*;
@@ -19,7 +19,7 @@ use dshg::connection::events::{self, EventsMessage};
 use dshg::connection::follow;
 use dshg::connection::http::UnaryClient;
 use dshg::protocol::methods::{self, SessionSummary};
-use dshg::protocol::settings::{self, SettingsDescribe};
+use dshg::protocol::settings::{self, NamespaceView, SettingsDescribe};
 use dshg::secrets::SessionCookie;
 use dshg::transcript::{
     apply_events, diffs_from_meta, parse_frame, tool_summary, FileDiff, TranscriptEvent,
@@ -47,6 +47,8 @@ pub enum AppEvent {
     },
     SettingsLoaded(SettingsDescribe),
     SettingsFailed(String),
+    SettingsSaved(NamespaceView),
+    SettingsSaveFailed(String),
     Failed {
         code: String,
         message: String,
@@ -88,7 +90,10 @@ pub struct AppState {
     settings: Option<SettingsDescribe>,
     settings_selected: usize,
     settings_loading: bool,
+    settings_saving: bool,
     settings_error: Option<String>,
+    settings_notice: Option<String>,
+    settings_editor: Entity<TextareaState>,
     following: Option<String>,
     base: Option<Url>,
     cookie: Option<SessionCookie>,
@@ -109,6 +114,9 @@ impl AppState {
         });
         let prompt_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("输入消息，Enter 发送（M2）")
+        });
+        let settings_editor = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder("选择命名空间后点「载入当前值」再编辑 JSON")
         });
         let (events_tx, events_rx): (Sender<AppEvent>, Receiver<AppEvent>) =
             async_channel::unbounded();
@@ -138,7 +146,10 @@ impl AppState {
             settings: None,
             settings_selected: 0,
             settings_loading: false,
+            settings_saving: false,
             settings_error: None,
+            settings_notice: None,
+            settings_editor,
             following: None,
             base: None,
             cookie: None,
@@ -251,6 +262,28 @@ impl AppState {
             AppEvent::SettingsFailed(message) => {
                 self.settings_loading = false;
                 self.settings_error = Some(message);
+            }
+            AppEvent::SettingsSaved(view) => {
+                self.settings_saving = false;
+                self.settings_notice = Some("已保存".to_string());
+                self.settings_error = None;
+                if let Some(settings) = &mut self.settings
+                    && let Some(index) = settings
+                        .namespaces
+                        .iter()
+                        .position(|item| item.ns == view.ns)
+                {
+                    settings.namespaces[index] = view;
+                }
+            }
+            AppEvent::SettingsSaveFailed(message) => {
+                self.settings_saving = false;
+                let hint = if message.contains("settings/conflict") {
+                    "（设置已被其他客户端修改，请先刷新）"
+                } else {
+                    ""
+                };
+                self.settings_error = Some(format!("{message}{hint}"));
             }
             AppEvent::Failed { code, message } => {
                 self.phase = Phase::NeedsAuth;
@@ -496,6 +529,71 @@ impl AppState {
         });
     }
 
+    fn load_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        let Some(namespace) = settings.namespaces.get(self.settings_selected) else {
+            return;
+        };
+        let text = serde_json::to_string_pretty(&namespace.value)
+            .unwrap_or_else(|_| "{}".to_string());
+        self.settings_editor
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.settings_notice = None;
+        cx.notify();
+    }
+
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        let Some(namespace) = settings.namespaces.get(self.settings_selected) else {
+            return;
+        };
+        if !settings.writable {
+            self.settings_error = Some("当前 profile 不可写".to_string());
+            cx.notify();
+            return;
+        }
+        let ns = namespace.ns.clone();
+        let revision = namespace.revision;
+        let text = self.settings_editor.read(cx).value().to_string();
+        let patch: Value = match serde_json::from_str(&text) {
+            Ok(value @ Value::Object(_)) => value,
+            Ok(_) => {
+                self.settings_error = Some("顶层必须是 JSON 对象".to_string());
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.settings_error = Some(format!("JSON 解析失败：{error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let (Some(base), Some(cookie)) = (self.base.clone(), self.cookie.clone()) else {
+            return;
+        };
+        self.settings_saving = true;
+        self.settings_notice = None;
+        self.settings_error = None;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                settings::update(&client, &ns, patch, revision).await
+            }
+            .await;
+            let event = match result {
+                Ok(view) => AppEvent::SettingsSaved(view),
+                Err(error) => AppEvent::SettingsSaveFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
+    }
+
     fn render_settings(
         &self,
         cx: &mut Context<Self>,
@@ -608,6 +706,62 @@ impl AppState {
             );
         }
 
+        let writable = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.writable)
+            .unwrap_or(false);
+        detail = detail.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child("编辑（合并保存，需与 revision 匹配）"),
+                )
+                .child(
+                    div()
+                        .h(px(180.))
+                        .w_full()
+                        .child(Textarea::new(&self.settings_editor).h_full()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(6.))
+                        .child(
+                            Button::new("settings-load-editor")
+                                .compact()
+                                .label("载入当前值")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.load_editor(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("settings-save")
+                                .primary()
+                                .compact()
+                                .label(if self.settings_saving { "保存中…" } else { "保存" })
+                                .disabled(!writable || self.settings_saving)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.save_settings(cx);
+                                })),
+                        ),
+                ),
+        );
+
+        if let Some(notice) = &self.settings_notice {
+            detail = detail.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(notice.clone()),
+            );
+        }
         if let Some(error) = &self.settings_error {
             detail = detail.child(
                 div()

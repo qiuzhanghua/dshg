@@ -41,6 +41,25 @@ pub async fn describe(client: &UnaryClient) -> Result<SettingsDescribe, AppError
     Ok(serde_json::from_value(value)?)
 }
 
+pub async fn update(
+    client: &UnaryClient,
+    ns: &str,
+    patch: Value,
+    expected_revision: i64,
+) -> Result<NamespaceView, AppError> {
+    let value = client
+        .call(
+            "settings/update",
+            serde_json::json!({
+                "ns": ns,
+                "patch": patch,
+                "expectedRevision": expected_revision,
+            }),
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
 pub async fn open_document(client: &UnaryClient) -> Result<(), AppError> {
     client
         .call("settings/openSettingsDocument", serde_json::json!({}))
