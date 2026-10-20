@@ -29,6 +29,39 @@ struct SessionListValue {
     items: Vec<SessionSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPage {
+    #[serde(default)]
+    pub records: Vec<Value>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
+/// Backwards history page ending before `before_seq`.
+pub async fn page(
+    client: &UnaryClient,
+    session_id: &str,
+    through_seq: i64,
+    before_seq: i64,
+    max_messages: i64,
+) -> Result<SessionPage, AppError> {
+    let value = client
+        .call(
+            "session/page",
+            serde_json::json!({
+                "request": {
+                    "address": { "kind": "session", "sessionId": session_id },
+                    "throughSeq": through_seq,
+                    "beforeSeq": before_seq,
+                    "maxMessages": max_messages,
+                }
+            }),
+        )
+        .await?;
+    Ok(serde_json::from_value(value)?)
+}
+
 /// `session/list` requires its single parameter to be named `_request` (measured).
 pub async fn session_list(client: &UnaryClient) -> Result<Vec<SessionSummary>, AppError> {
     let value = client

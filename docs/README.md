@@ -37,7 +37,8 @@ dshg：DeepSeek Harness（dsh）的原生桌面 GUI 客户端（Rust + GPUI / GP
 | T5 会话列表 + 引导 UI | 完成（已手工验收） |
 
 M1（只读回放）：`session/follow` 快照、Markdown/工具卡片、assistant `text-delta` 流式、
-follow 断线自动重连已完成；gap 修复（`session/page`）与虚拟化列表待做。
+follow 断线自动重连、transcript 虚拟化（`v_virtual_list`）、历史分页（`session/page`，
+`hasMore` 时显示「加载更早」）已完成。重连用新 snapshot 替换历史，避免缺口累积。
 
 M2（对话）：Composer + `session/prompt` 已接（`--prompt` 验证 accepted）。
 

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::path::Path;
 
 use async_channel::{Receiver, Sender};
@@ -7,6 +8,7 @@ use gpui_kit::component::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::text::TextView;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -65,6 +67,8 @@ pub enum AppEvent {
     FileLoaded(FileText),
     FilesFailed(String),
     FileChanged(String),
+    HistoryLoaded(dshg::protocol::methods::SessionPage),
+    HistoryFailed(String),
     Failed {
         code: String,
         message: String,
@@ -119,6 +123,11 @@ pub struct AppState {
     following_cwd: Option<String>,
     preview_absolute: Option<String>,
     watch_task: Option<tokio::task::JoinHandle<()>>,
+    transcript_scroll: VirtualListScrollHandle,
+    history_cursor: Option<i64>,
+    oldest_seq: Option<i64>,
+    history_has_more: bool,
+    history_loading: bool,
     plugins_open: bool,
     plugins: Option<Inventory>,
     plugins_loading: bool,
@@ -201,6 +210,11 @@ impl AppState {
             following_cwd: None,
             preview_absolute: None,
             watch_task: None,
+            transcript_scroll: VirtualListScrollHandle::new(),
+            history_cursor: None,
+            oldest_seq: None,
+            history_has_more: false,
+            history_loading: false,
             plugins_open: false,
             plugins: None,
             plugins_loading: false,
@@ -224,11 +238,20 @@ impl AppState {
             events_tx,
         };
 
-        if std::env::var("DSHG_DEMO_TRANSCRIPT").is_ok() {
-            state.phase = Phase::Ready;
-            state.following = Some("demo".to_string());
-            state.authority = Some("demo".to_string());
-            state.transcript = demo_transcript();
+        match std::env::var("DSHG_DEMO_TRANSCRIPT").as_deref() {
+            Ok("bulk") => {
+                state.phase = Phase::Ready;
+                state.following = Some("demo".to_string());
+                state.authority = Some("demo".to_string());
+                state.transcript = bulk_transcript(500);
+            }
+            Ok(_) => {
+                state.phase = Phase::Ready;
+                state.following = Some("demo".to_string());
+                state.authority = Some("demo".to_string());
+                state.transcript = demo_transcript();
+            }
+            Err(_) => {}
         }
         state
     }
@@ -410,6 +433,35 @@ impl AppState {
                 self.files_loading = false;
                 self.files_error = Some(message);
             }
+            AppEvent::HistoryLoaded(page) => {
+                self.history_loading = false;
+                let mut items = Vec::new();
+                let mut oldest: Option<i64> = None;
+                for record in &page.records {
+                    if let Some(seq) = record
+                        .get("event")
+                        .and_then(|event| event.get("seq"))
+                        .and_then(Value::as_i64)
+                    {
+                        oldest = Some(oldest.map_or(seq, |current| current.min(seq)));
+                    }
+                    if let Some(event) =
+                        record.get("event").and_then(dshg::transcript::parse_event)
+                    {
+                        dshg::transcript::apply_events(&mut items, vec![event]);
+                    }
+                }
+                if let Some(oldest) = oldest {
+                    self.oldest_seq = Some(oldest);
+                }
+                items.append(&mut self.transcript);
+                self.transcript = items;
+                self.history_has_more = page.has_more;
+            }
+            AppEvent::HistoryFailed(message) => {
+                self.history_loading = false;
+                self.files_error = Some(message);
+            }
             AppEvent::FileChanged(path) => {
                 if self.preview_absolute.as_deref() == Some(path.as_str()) {
                     self.read_file(path, cx);
@@ -434,12 +486,27 @@ impl AppState {
     fn push_frame(&mut self, value: Value) {
         if value.get("type").and_then(Value::as_str) == Some("assistant-stream") {
             self.apply_assistant_stream(&value);
+            self.transcript_scroll.scroll_to_bottom();
             return;
         }
         let (is_snapshot, events) = parse_frame(&value);
         if is_snapshot {
             self.transcript.clear();
             self.live_assistant.clear();
+            self.history_cursor = value.get("cursor").and_then(Value::as_i64);
+            self.oldest_seq = value
+                .get("records")
+                .and_then(Value::as_array)
+                .and_then(|records| {
+                    records
+                        .iter()
+                        .filter_map(|record| record.get("event")?.get("seq")?.as_i64())
+                        .min()
+                });
+            self.history_has_more = value
+                .get("hasMore")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         }
         if events
             .iter()
@@ -1081,6 +1148,36 @@ impl AppState {
                     .child(rows),
             )
             .into_any_element()
+    }
+
+    fn load_older(&mut self, cx: &mut Context<Self>) {
+        let (Some(session_id), Some(through), Some(before), Some(base), Some(cookie)) = (
+            self.following.clone(),
+            self.history_cursor,
+            self.oldest_seq,
+            self.base.clone(),
+            self.cookie.clone(),
+        ) else {
+            return;
+        };
+        if self.history_loading {
+            return;
+        }
+        self.history_loading = true;
+        cx.notify();
+        let tx = self.events_tx.clone();
+        backend::runtime().spawn(async move {
+            let result = async {
+                let client = UnaryClient::new(base, Some(cookie))?;
+                methods::page(&client, &session_id, through, before, 50).await
+            }
+            .await;
+            let event = match result {
+                Ok(page) => AppEvent::HistoryLoaded(page),
+                Err(error) => AppEvent::HistoryFailed(error.to_string()),
+            };
+            tx.send(event).await.ok();
+        });
     }
 
     fn toggle_files(&mut self, cx: &mut Context<Self>) {
@@ -1765,6 +1862,10 @@ impl AppState {
         self.file_preview = None;
         self.preview_absolute = None;
         self.files_error = None;
+        self.history_cursor = None;
+        self.oldest_seq = None;
+        self.history_has_more = false;
+        self.history_loading = false;
         if let Some(task) = self.watch_task.take() {
             task.abort();
         }
@@ -2265,34 +2366,88 @@ impl AppState {
                 .into_any_element();
         }
 
-        let mut column = div().flex().flex_col().gap(px(12.)).p(px(16.));
-        if self.transcript.is_empty() {
-            column = column.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .child("载入会话…"),
-            );
-        }
-        for (index, item) in self.transcript.iter().enumerate() {
-            column = column.child(self.render_item(index, item, cx, muted, accent, success, danger));
-        }
-        if !self.live_assistant.is_empty() {
-            let live = TranscriptItem::Assistant(self.live_assistant.clone());
-            column = column.child(self.render_item(self.transcript.len(), &live, cx, muted, accent, success, danger));
+        if self.transcript.is_empty() && self.live_assistant.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child("载入会话…"),
+                )
+                .into_any_element();
         }
 
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scrollbar()
-            .child(column)
+        let total = self.transcript.len() + usize::from(!self.live_assistant.is_empty());
+        let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
+            (0..total)
+                .map(|index| {
+                    let height = if index < self.transcript.len() {
+                        item_height(&self.transcript[index])
+                    } else {
+                        item_height(&TranscriptItem::Assistant(self.live_assistant.clone()))
+                    };
+                    size(px(0.), px(height))
+                })
+                .collect(),
+        );
+        let view = cx.entity();
+        let list = v_virtual_list(
+            view,
+            "transcript",
+            sizes,
+            move |this, range, _window, cx| {
+                range
+                    .map(|index| {
+                        let item = if index < this.transcript.len() {
+                            this.transcript[index].clone()
+                        } else {
+                            TranscriptItem::Assistant(this.live_assistant.clone())
+                        };
+                        this.render_item(index, &item, cx, muted, accent, success, danger)
+                    })
+                    .collect()
+            },
+        )
+        .track_scroll(&self.transcript_scroll);
+
+        let mut container = div().flex().flex_col().flex_1().min_h(px(0.));
+        if self.history_has_more {
+            container = container.child(
+                div().p(px(8.)).child(
+                    Button::new("load-older")
+                        .compact()
+                        .label(if self.history_loading { "加载中…" } else { "加载更早" })
+                        .disabled(self.history_loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
+                ),
+            );
+        }
+        container
+            .child(div().flex_1().min_h(px(0.)).child(list))
             .into_any_element()
     }
 }
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn bulk_transcript(count: usize) -> Vec<TranscriptItem> {
+    (0..count)
+        .map(|index| {
+            if index % 2 == 0 {
+                TranscriptItem::User(format!("问题 #{index}：这是一条用于虚拟化冒烟的消息。"))
+            } else {
+                TranscriptItem::Assistant(format!(
+                    "回答 #{index}：\n\n- 第一行\n- 第二行\n- 第三行\n\n以及一段更长的文字用于撑高行高。"
+                ))
+            }
+        })
+        .collect()
 }
 
 fn demo_transcript() -> Vec<TranscriptItem> {
@@ -2318,6 +2473,22 @@ fn demo_transcript() -> Vec<TranscriptItem> {
             }),
         }),
     ]
+}
+
+fn item_height(item: &TranscriptItem) -> f32 {
+    let chars = match item {
+        TranscriptItem::User(text) | TranscriptItem::Assistant(text) => text.chars().count(),
+        TranscriptItem::Tool(call) => {
+            call.arguments.chars().count()
+                + call
+                    .result
+                    .as_ref()
+                    .map(|result| result.text.chars().count().min(2000))
+                    .unwrap_or(0)
+        }
+    };
+    let lines = (chars / 80) + 1;
+    (28.0 + lines as f32 * 16.0).clamp(28.0, 600.0)
 }
 
 fn render_diff(diff: &FileDiff, muted: Hsla, success: Hsla, danger: Hsla) -> AnyElement {
